@@ -1,42 +1,42 @@
-# syntax=docker/dockerfile:1.6
-# JengaBank Payments (APP04) — competition image.
-# Private, non-root, linux/amd64, no internet access at runtime.
+# syntax=docker/dockerfile:1
+# Build:  docker buildx build --platform linux/amd64 -t ghcr.io/<owner>/jengabank-payments:v1 .
+# Never tag "latest". New tag every push: v1, v2, v3...
 
-# ---------- build stage: Maven produces the executable jar ----------
-FROM maven:3.9-eclipse-temurin-21 AS build
-WORKDIR /build
+# Build stages run natively (fast on Apple Silicon); only the runtime is amd64.
+# ---------- 1. Frontend (React) ----------
+FROM --platform=$BUILDPLATFORM node:22-slim AS web
+WORKDIR /web
+COPY jenga-frontend/package.json jenga-frontend/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY jenga-frontend/ ./
+RUN npm run build
 
-COPY pom.xml .
-# Warm the dependency cache in a separate layer so code changes rebuild fast.
-RUN mvn -B -q -DskipTests dependency:go-offline
-
+# ---------- 2. Backend (Maven) ----------
+FROM --platform=$BUILDPLATFORM maven:3.9-eclipse-temurin-21 AS build
+WORKDIR /src
+COPY pom.xml ./
+RUN mvn -B -q dependency:go-offline
 COPY src ./src
-RUN mvn -B -DskipTests clean package
+COPY --from=web /web/dist/ ./src/main/resources/static/
+# Tests run in CI; the image build stays fast and deterministic.
+RUN mvn -B -q package -DskipTests \
+ && find target -maxdepth 1 -name '*.jar' ! -name '*-plain.jar' ! -name '*.original' -exec cp {} /src/app.jar \;
 
-# ---------- runtime stage: JRE only, non-root ----------
-FROM eclipse-temurin:21-jre-jammy
-
-# curl is only used by the container healthcheck.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN useradd --system --uid 10001 --home-dir /app --shell /usr/sbin/nologin jenga \
-    && mkdir -p /app /tmp/jenga \
-    && chown -R jenga:jenga /app /tmp/jenga
-
+# ---------- 3. Runtime ----------
+FROM --platform=linux/amd64 eclipse-temurin:21-jre-alpine AS runtime
+RUN apk upgrade --no-cache \
+ && addgroup -S -g 10001 app \
+ && adduser  -S -u 10001 -G app -H -s /sbin/nologin app
 WORKDIR /app
-COPY --from=build /build/target/app.jar /app/app.jar
-RUN chown jenga:jenga /app/app.jar
+COPY --from=build --chown=10001:10001 /src/app.jar /app/app.jar
+
+# JVM shares the 3 GB limit with PostgreSQL: cap the heap, die cleanly on OOM.
+ENV JAVA_TOOL_OPTIONS="-XX:MaxRAMPercentage=50 -XX:+ExitOnOutOfMemoryError -XX:+UseSerialGC -Djava.io.tmpdir=/tmp -Dfile.encoding=UTF-8 -Duser.timezone=UTC"
 
 USER 10001:10001
-
-ENV SERVER_PORT=8080 \
-    JAVA_OPTS="-XX:MaxRAMPercentage=75.0 -XX:+ExitOnOutOfMemoryError -Djava.io.tmpdir=/tmp/jenga"
-
 EXPOSE 8080
 
-HEALTHCHECK --interval=10s --timeout=3s --start-period=45s --retries=5 \
-    CMD curl -fsS http://localhost:8080/health || exit 1
+HEALTHCHECK --interval=15s --timeout=3s --start-period=60s --retries=3 \
+  CMD wget -qO- http://127.0.0.1:8080/healthz >/dev/null || exit 1
 
-ENTRYPOINT ["sh", "-c", "exec java $JAVA_OPTS -jar /app/app.jar"]
+ENTRYPOINT ["java", "-jar", "/app/app.jar"]

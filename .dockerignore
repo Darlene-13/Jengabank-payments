@@ -1,0 +1,14 @@
+# Keep the build context small and never ship local builds or secrets.
+.git
+.github
+.idea
+.vscode
+docs
+target
+*.md
+.env
+.env.*
+
+jenga-frontend/node_modules
+jenga-frontend/dist
+jenga-frontend/dev-dist

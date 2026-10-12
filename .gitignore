@@ -6,3 +6,17 @@ mvn-output.log
 mvn-test.log
 target/
 200
+# Maven
+target/
+
+# IDEs
+.idea/
+.vscode/
+*.iml
+
+# Local secrets
+.env
+.env.*
+
+# OS
+.DS_Store

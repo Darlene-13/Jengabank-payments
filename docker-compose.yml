@@ -1,38 +1,46 @@
+# Local development only. JengaSec provides PostgreSQL 16 on the range.
+# Mirrors the range limits so problems show up here first.
+#   docker compose up -d db          # just the database, run the app from your IDE
+#   docker compose up --build        # database + the real image, like the range
+
 services:
   db:
     image: postgres:16-alpine
     environment:
-      POSTGRES_DB: jengabank
-      POSTGRES_USER: jenga
-      POSTGRES_PASSWORD: jenga
+      POSTGRES_DB: jengabank_payments
+      POSTGRES_USER: jengabank
+      POSTGRES_PASSWORD: ${LOCAL_DB_PASSWORD:-local-dev-only}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"            # localhost only, never your whole network
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U jenga -d jengabank"]
-      interval: 5s
+      test: ["CMD-SHELL", "pg_isready -U jengabank -d jengabank_payments"]
+      interval: 3s
       timeout: 3s
-      retries: 10
+      retries: 20
 
   app:
-    build: .
+    build:
+      context: .
+      platforms: ["linux/amd64"]
     depends_on:
       db:
         condition: service_healthy
     environment:
-      SERVER_PORT: "8080"
-      SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/jengabank
-      SPRING_DATASOURCE_USERNAME: jenga
-      SPRING_DATASOURCE_PASSWORD: jenga
+      DB_URL: jdbc:postgresql://db:5432/jengabank_payments
+      DB_USER: jengabank
+      DB_PASSWORD: ${LOCAL_DB_PASSWORD:-local-dev-only}
     ports:
-      - "8080:8080"
-    # No internet access at runtime: nothing is downloaded once the container runs.
-    read_only: false
+      - "127.0.0.1:8080:8080"
+    read_only: true
+    tmpfs:
+      - /tmp
     security_opt:
       - no-new-privileges:true
-    cap_drop:
-      - ALL
+    cap_drop: [ALL]
+    cpus: "1.5"                           # range gives 2 CPU / 3 GB for app + database together
+    mem_limit: 2g
 
 volumes:
   pgdata:
