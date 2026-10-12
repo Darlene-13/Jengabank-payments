@@ -1,0 +1,29 @@
+# All secrets come from the environment. Nothing sensitive is committed here.
+spring:
+  application:
+    name: jengabank-payments
+  datasource:
+    url: ${DB_URL}
+    username: ${DB_USER}
+    password: ${DB_PASSWORD}
+    hikari:
+      maximum-pool-size: 10
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+  jackson:
+    time-zone: UTC
+  main:
+    banner-mode: off
+
+server:
+  port: 8080
+  shutdown: graceful
+  error:
+    include-message: never
+    include-stacktrace: never
+    include-exception: false
+
+springdoc:
+  api-docs:
+    path: /openapi.json
