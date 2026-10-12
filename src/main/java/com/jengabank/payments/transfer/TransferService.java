@@ -1,296 +1,259 @@
 package com.jengabank.payments.transfer;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.jengabank.payments.account.Account;
-import com.jengabank.payments.account.AccountRepository;
+import java.time.Clock;
+import java.time.OffsetDateTime;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeParseException;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
 import com.jengabank.payments.audit.AuditService;
-import com.jengabank.payments.auth.Actor;
-import com.jengabank.payments.config.AppProperties;
+import com.jengabank.payments.audit.RefusalException;
+import com.jengabank.payments.auth.AuthenticatedUser;
+import com.jengabank.payments.common.Cursors;
+import com.jengabank.payments.common.Page;
+import com.jengabank.payments.config.JengaProperties;
+import com.jengabank.payments.error.ApiError;
 import com.jengabank.payments.error.BusinessException;
 import com.jengabank.payments.fraud.FraudContext;
 import com.jengabank.payments.fraud.FraudDecision;
 import com.jengabank.payments.fraud.FraudEngine;
 import com.jengabank.payments.fraud.FraudVerdict;
-import com.jengabank.payments.idempotency.IdempotencyRecord;
 import com.jengabank.payments.idempotency.IdempotencyService;
+import com.jengabank.payments.ledger.LedgerAccount;
+import com.jengabank.payments.ledger.LedgerRepository;
+import com.jengabank.payments.ledger.LedgerService;
 import com.jengabank.payments.limits.LimitService;
 import com.jengabank.payments.limits.LimitViolation;
-import com.jengabank.payments.limits.WindowTotals;
-import com.jengabank.payments.ledger.LedgerService;
 import com.jengabank.payments.logging.Actions;
+import com.jengabank.payments.logging.RequestLogFilter;
 import com.jengabank.payments.logging.SecurityEventLogger;
-import java.time.Clock;
-import java.time.Instant;
-import java.time.LocalDateTime;
-import java.time.temporal.ChronoUnit;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Locale;
-import java.util.Map;
-import java.util.Optional;
-import java.util.UUID;
-import org.springframework.http.HttpStatus;
-import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
+import com.jengabank.payments.transfer.TransferDtos.CreateTransferRequest;
+import com.jengabank.payments.transfer.TransferDtos.TransferDto;
 
+import org.slf4j.MDC;
+
+/**
+ * Creating a transfer, in order, all inside one database transaction:
+ *   idempotency -> ownership -> account locks -> funds -> limits -> fraud -> approval threshold -> persist.
+ * Refusals throw RefusalException: everything rolls back, then the audit record is written.
+ * A fraud BLOCK is the exception: the attempt is stored as evidence and answered with 422.
+ */
 @Service
 public class TransferService {
 
-    private final AccountRepository accounts;
+    private static final String PATH = "/api/v1/transfers";
+
     private final TransferRepository transfers;
+    private final LedgerRepository accounts;
+    private final LedgerService ledger;
     private final LimitService limits;
     private final FraudEngine fraud;
-    private final LedgerService ledger;
     private final IdempotencyService idempotency;
     private final AuditService audit;
     private final SecurityEventLogger events;
-    private final AppProperties properties;
-    private final ObjectMapper mapper;
+    private final JengaProperties properties;
     private final Clock clock;
 
-    public TransferService(AccountRepository accounts,
-                           TransferRepository transfers,
-                           LimitService limits,
-                           FraudEngine fraud,
-                           LedgerService ledger,
-                           IdempotencyService idempotency,
-                           AuditService audit,
-                           SecurityEventLogger events,
-                           AppProperties properties,
-                           ObjectMapper mapper,
-                           Clock clock) {
-        this.accounts = accounts;
+    public TransferService(TransferRepository transfers, LedgerRepository accounts, LedgerService ledger,
+                           LimitService limits, FraudEngine fraud, IdempotencyService idempotency,
+                           AuditService audit, SecurityEventLogger events, JengaProperties properties, Clock clock) {
         this.transfers = transfers;
+        this.accounts = accounts;
+        this.ledger = ledger;
         this.limits = limits;
         this.fraud = fraud;
-        this.ledger = ledger;
         this.idempotency = idempotency;
         this.audit = audit;
         this.events = events;
         this.properties = properties;
-        this.mapper = mapper;
         this.clock = clock;
     }
 
     @Transactional
-    public TransferResponse create(TransferRequest request, Actor maker, String idempotencyKey) {
-        // 0. Idempotency-Key required for money-changing POST (team-plan: missing key -> 400).
-        if (idempotencyKey == null || idempotencyKey.isBlank()) {
-            events.emit(Actions.REQUEST_INVALID, 400, maker.id(),
-                    Map.of("path", "/transfers", "reason", "missing_idempotency_key"));
-            throw new BusinessException(HttpStatus.BAD_REQUEST, Actions.REQUEST_INVALID,
-                    "Idempotency-Key header is required for money-changing requests");
+    public ResponseEntity<Object> create(AuthenticatedUser me, CreateTransferRequest req, String idempotencyKey) {
+        IdempotencyService.Start idem = idempotency.begin(me, idempotencyKey, "POST", PATH, req);
+        if (idem.isReplay()) {
+            return idem.replay();
+        }
+        transfers.lockUser(me.id());
+
+        // Ownership: the source must be one of the caller's accounts. Not yours looks like not found.
+        LedgerAccount from = accounts.findById(req.fromAccountId())
+                .filter(a -> me.id().equals(a.ownerId()))
+                .orElseThrow(() -> {
+                    events.warn(Actions.AUTHZ_ACCESS_DENIED, "username", me.username(), "resource", "account",
+                            "account_id", req.fromAccountId(), "reason", "not_found_or_not_owner");
+                    return BusinessException.notFound();
+                });
+        LedgerAccount to = accounts.findByNumber(req.toAccountNumber())
+                .filter(LedgerAccount::isCustomer)
+                .orElseThrow(() -> refuse(me, req, HttpStatus.NOT_FOUND, "RECIPIENT_NOT_FOUND",
+                        "We couldn't find an account with that number.", Actions.REQUEST_INVALID, "unknown_recipient"));
+        if (from.id().equals(to.id())) {
+            throw refuse(me, req, HttpStatus.UNPROCESSABLE_ENTITY, "SAME_ACCOUNT",
+                    "You can't send money to the same account.", Actions.TRANSFER_INVALID_AMOUNT, "same_account");
+        }
+        if (!accounts.lock(from.id(), to.id()).stream().allMatch(LedgerAccount::isActive)) {
+            throw refuse(me, req, HttpStatus.UNPROCESSABLE_ENTITY, "ACCOUNT_NOT_ACTIVE",
+                    "One of these accounts can't send or receive money right now.", Actions.REQUEST_INVALID,
+                    "account_not_active");
         }
 
-        String requestHash = idempotency.hash(request);
-
-        // 1. Idempotency replay / conflict
-        Optional<IdempotencyRecord> cached = idempotency.find(idempotencyKey);
-        if (cached.isPresent()) {
-            IdempotencyRecord record = cached.get();
-            if (!record.requestHash().equals(requestHash)) {
-                rejectIdempotencyMismatch(idempotencyKey, requestHash, maker);
-            }
-            events.emit(Actions.IDEMPOTENCY_REPLAY, record.responseStatus(), maker.id(),
-                    Map.of("key", idempotencyKey.trim(), "path", "/transfers"));
-            return readResponse(record.responseBody());
-        }
-
-        String currency = normalizeCurrency(request, maker);
-        String sourceAccountNo = trim(request.sourceAccountNo(), "sourceAccountNo");
-        String targetAccountNo = trim(request.targetAccountNo(), "targetAccountNo");
-        long amount = request.amountMinor();
-
-        if (sourceAccountNo.equals(targetAccountNo)) {
-            events.emit(Actions.TRANSFER_SAME_ACCOUNT, 422, maker.id(),
-                    Map.of("path", "/transfers", "account", sourceAccountNo, "amount_minor", amount));
-            audit.record(maker.id(), Actions.TRANSFER_SAME_ACCOUNT, sourceAccountNo,
-                    Map.of("amount_minor", amount));
-            throw new BusinessException(HttpStatus.UNPROCESSABLE_ENTITY, Actions.TRANSFER_SAME_ACCOUNT,
-                    "Source and target account must differ");
-        }
-
-        // 2. Lock accounts, check funds.
-        List<Account> locked = accounts.lockPair(sourceAccountNo, targetAccountNo);
-        Account source = locked.stream().filter(a -> a.accountNo().equals(sourceAccountNo)).findFirst()
-                .orElseThrow(() -> notFound(sourceAccountNo, maker));
-        Account target = locked.stream().filter(a -> a.accountNo().equals(targetAccountNo)).findFirst()
-                .orElseThrow(() -> notFound(targetAccountNo, maker));
-
-        long balance = accounts.balanceOf(source.accountNo());
+        long amount = req.amountMinor();
+        long balance = accounts.balance(from.id());
         if (balance < amount) {
-            events.emit(Actions.TRANSFER_INSUFFICIENT_FUNDS, 422, maker.id(),
-                    Map.of("path", "/transfers", "account", source.accountNo(),
-                            "balance_minor", balance, "amount_minor", amount));
-            audit.record(maker.id(), Actions.TRANSFER_INSUFFICIENT_FUNDS, source.accountNo(),
-                    Map.of("balance_minor", balance, "amount_minor", amount));
-            throw new BusinessException(HttpStatus.UNPROCESSABLE_ENTITY, Actions.TRANSFER_INSUFFICIENT_FUNDS,
-                    "Insufficient funds: balance " + balance + " < " + amount);
+            throw refuse(me, req, HttpStatus.UNPROCESSABLE_ENTITY, "INSUFFICIENT_FUNDS",
+                    "There isn't enough money in this account.", Actions.TRANSFER_INSUFFICIENT_FUNDS,
+                    "insufficient_funds");
         }
 
-        // 3. Limits.
-        Instant now = Instant.now(clock);
-        WindowTotals totals = limits.totals(source.ownerId(), now);
-        List<LimitViolation> violations = limits.check(totals, amount);
+        LimitService.Usage usage = limits.usage(me.id());
+        List<LimitViolation> violations = limits.check(usage, amount);
         if (!violations.isEmpty()) {
-            List<String> descriptions = violations.stream().map(LimitViolation::message).toList();
-            Map<String, Object> extra = new LinkedHashMap<>();
-            extra.put("path", "/transfers");
-            extra.put("owner", source.ownerId());
-            extra.put("account", source.accountNo());
-            extra.put("amount_minor", amount);
-            extra.put("violations", descriptions);
-            extra.put("hourly_total_minor", totals.hourlyMinor());
-            extra.put("daily_total_minor", totals.dailyMinor());
-            extra.put("weekly_total_minor", totals.weeklyMinor());
-            events.emit(Actions.LIMIT_EXCEEDED, 422, maker.id(), extra);
-            audit.record(maker.id(), Actions.LIMIT_EXCEEDED, source.accountNo(),
-                    Map.of("amount_minor", amount, "violations", descriptions));
-            throw new BusinessException(HttpStatus.UNPROCESSABLE_ENTITY, Actions.LIMIT_EXCEEDED,
-                    String.join("; ", descriptions));
+            List<String> reasons = violations.stream().map(LimitViolation::message).toList();
+            Map<String, Object> details = details(req);
+            details.put("violations", violations.stream().map(LimitViolation::rule).toList());
+            events.warn(Actions.LIMIT_EXCEEDED, "username", me.username(), "amount_minor", amount,
+                    "violations", details.get("violations"), "last24h_minor", usage.last24hMinor());
+            throw new RefusalException(HttpStatus.UNPROCESSABLE_ENTITY, "LIMIT_EXCEEDED",
+                    "This transfer is over your limit.", reasons,
+                    me.username(), Actions.LIMIT_EXCEEDED, "account:" + from.accountNumber(), details);
         }
 
-        // 4. Fraud engine.
-        boolean newPayee = transfers.countTransfersBetween(source.ownerId(), target.ownerId()) == 0;
-        long blockedLast24h = transfers.countBlockedSince(source.ownerId(), now.minus(24, ChronoUnit.HOURS));
-        FraudContext context = new FraudContext(
-                source.ownerId(),
-                target.ownerId(),
-                source.accountNo(),
-                target.accountNo(),
+        FraudVerdict verdict = fraud.evaluate(new FraudContext(
                 amount,
-                currency,
-                LocalDateTime.now(clock).getHour(),
-                totals.hourlyMinor(),
-                totals.dailyMinor(),
-                newPayee,
-                (int) blockedLast24h,
-                properties.getPerTransferLimitMinor(),
-                properties.getHourlyLimitMinor(),
-                properties.getDailyLimitMinor(),
-                properties.getStructuringRatio());
-        FraudVerdict verdict = fraud.evaluate(context);
+                ZonedDateTime.now(clock.withZone(ZoneId.of(properties.fraud().zone()))).getHour(),
+                usage.last24hMinor(),
+                !transfers.hasPaidBefore(me.id(), to.id()),
+                transfers.blockedInLast24h(me.id()),
+                properties.limits().maxPerTransferMinor(),
+                properties.limits().dailyTotalMinor()));
 
         TransferStatus status = switch (verdict.decision()) {
-            case ALLOW -> TransferStatus.COMPLETED;
-            case REVIEW -> TransferStatus.PENDING_APPROVAL;
             case BLOCK -> TransferStatus.BLOCKED;
+            case REVIEW -> TransferStatus.PENDING_APPROVAL;
+            case ALLOW -> amount >= properties.approval().thresholdMinor()
+                    ? TransferStatus.PENDING_APPROVAL
+                    : TransferStatus.COMPLETED;
         };
 
-        // 5. Persist with the final state.
-        String reference = newReference();
-        Long id = transfers.insert(reference, source.id(), target.id(),
-                source.ownerId(), target.ownerId(), amount, currency, status,
-                verdict.decision(), verdict.reasons(), maker.id());
-        Transfer transfer = transfers.findById(id).orElseThrow();
-        if (status.isPosted()) {
-            ledger.post(transfer);
+        UUID journalId = status == TransferStatus.COMPLETED
+                ? ledger.postTransfer(from.id(), to.id(), amount, description(req), me.id())
+                : null;
+        UUID id = transfers.insert(from.id(), to.id(), amount, req.reference().trim(), status,
+                verdict.decision(), verdict.reasons(), journalId, me.id());
+        Transfer transfer = transfers.find(id).orElseThrow();
+
+        Map<String, Object> details = details(req);
+        details.put("transfer_id", id);
+        details.put("status", status.name());
+        details.put("fraud_decision", verdict.decision().name());
+        details.put("fraud_reasons", verdict.reasons());
+        audit.record(me.username(), actionFor(status), "transfer:" + id, details);
+        events.info(fraudAction(verdict.decision()), "username", me.username(), "transfer_id", id,
+                "reasons", verdict.reasons());
+        events.info(Actions.TRANSFER_CREATED, "username", me.username(), "transfer_id", id,
+                "amount_minor", amount, "status", status.name());
+        if (status == TransferStatus.BLOCKED) {
+            events.warn(Actions.TRANSFER_BLOCKED, "username", me.username(), "transfer_id", id,
+                    "reasons", verdict.reasons());
+            ApiError blocked = new ApiError("FRAUD_BLOCKED", "This transfer was stopped by our fraud checks.",
+                    MDC.get(RequestLogFilter.MDC_REQUEST_ID), verdict.reasons());
+            return idempotency.complete(idem, HttpStatus.UNPROCESSABLE_ENTITY, blocked);
         }
+        events.info(actionFor(status), "username", me.username(), "transfer_id", id, "amount_minor", amount);
 
-        TransferResponse response = TransferResponse.from(transfer);
+        HttpStatus http = status == TransferStatus.COMPLETED ? HttpStatus.CREATED : HttpStatus.ACCEPTED;
+        return idempotency.complete(idem, http, TransferDto.of(transfer));
+    }
 
-        // 5b. Idempotency cache.
-        int cachedStatus = status == TransferStatus.BLOCKED ? 422 : 201;
-        idempotency.remember(idempotencyKey, requestHash, cachedStatus, writeResponse(response));
+    public Page<TransferDto> list(AuthenticatedUser me, String statusFilter, String cursor, Integer limit) {
+        int lim = Cursors.limit(limit);
+        TransferStatus status = null;
+        if (statusFilter != null && !statusFilter.isBlank()) {
+            try {
+                status = TransferStatus.valueOf(statusFilter);
+            } catch (IllegalArgumentException e) {
+                throw BusinessException.badRequest("INVALID_PARAMETER", "Unknown transfer status.");
+            }
+        }
+        OffsetDateTime beforeTs = null;
+        UUID beforeId = null;
+        String raw = Cursors.decode(cursor);
+        if (raw != null) {
+            String[] parts = raw.split("\\|", 2);
+            if (parts.length != 2) {
+                throw Cursors.invalid();
+            }
+            try {
+                beforeTs = OffsetDateTime.parse(parts[0]);
+                beforeId = UUID.fromString(parts[1]);
+            } catch (DateTimeParseException | IllegalArgumentException e) {
+                throw Cursors.invalid();
+            }
+        }
+        UUID visibleTo = me.isStaff() ? null : me.id();
+        Page<Transfer> page = Page.of(transfers.page(visibleTo, status, beforeTs, beforeId, lim + 1), lim,
+                t -> t.createdAt() + "|" + t.id());
+        return new Page<>(page.items().stream().map(TransferDto::of).toList(), page.nextCursor());
+    }
 
-        // 5c. Audit + stdout telemetry.
-        Map<String, Object> decisionDetails = new LinkedHashMap<>();
-        decisionDetails.put("transfer_id", transfer.id());
-        decisionDetails.put("reference", reference);
-        decisionDetails.put("amount_minor", amount);
-        decisionDetails.put("currency", currency);
-        decisionDetails.put("source", sourceAccountNo);
-        decisionDetails.put("target", targetAccountNo);
-        decisionDetails.put("decision", verdict.decision().name());
-        decisionDetails.put("reasons", verdict.reasons());
+    public TransferDto get(AuthenticatedUser me, UUID id) {
+        return transfers.find(id)
+                .filter(t -> me.isStaff() || t.visibleTo(me.id()))
+                .map(TransferDto::of)
+                .orElseThrow(() -> {
+                    events.warn(Actions.AUTHZ_ACCESS_DENIED, "username", me.username(), "resource", "transfer",
+                            "transfer_id", id, "reason", "not_found_or_not_visible");
+                    return BusinessException.notFound();
+                });
+    }
 
-        String action = actionFor(verdict.decision());
-        audit.record(maker.id(), action, reference, decisionDetails);
+    private RefusalException refuse(AuthenticatedUser me, CreateTransferRequest req, HttpStatus http, String code,
+                                    String message, String action, String reason) {
+        Map<String, Object> details = details(req);
+        details.put("reason", reason);
+        events.warn(action, "username", me.username(), "reason", reason, "amount_minor", req.amountMinor());
+        return new RefusalException(http, code, message, List.of(),
+                me.username(), action, "account:" + req.fromAccountId(), details);
+    }
 
-        int httpStatus = switch (status) {
-            case COMPLETED -> 201;
-            case PENDING_APPROVAL -> 202;
-            case BLOCKED -> 422;
-            default -> 200;
+    private static Map<String, Object> details(CreateTransferRequest req) {
+        Map<String, Object> details = new LinkedHashMap<>();
+        details.put("from_account_id", req.fromAccountId());
+        details.put("to_account_number", req.toAccountNumber());
+        details.put("amount_minor", req.amountMinor());
+        return details;
+    }
+
+    private static String description(CreateTransferRequest req) {
+        String reference = req.reference().trim();
+        return reference.isEmpty() ? "Transfer to " + req.toAccountNumber() : reference;
+    }
+
+    private static String actionFor(TransferStatus status) {
+        return switch (status) {
+            case COMPLETED -> Actions.TRANSFER_COMPLETED;
+            case PENDING_APPROVAL -> Actions.TRANSFER_PENDING_APPROVAL;
+            case BLOCKED -> Actions.TRANSFER_BLOCKED;
+            default -> Actions.TRANSFER_CREATED;
         };
-        events.emit(action, httpStatus, maker.id(), decisionDetails);
-
-        return response;
     }
 
-    public TransferResponse get(Long id) {
-        return transfers.findById(id)
-                .map(TransferResponse::from)
-                .orElseThrow(() -> new BusinessException(HttpStatus.NOT_FOUND, Actions.TRANSFER_NOT_FOUND,
-                        "No such transfer: " + id));
-    }
-
-    private String actionFor(FraudDecision decision) {
+    private static String fraudAction(FraudDecision decision) {
         return switch (decision) {
             case ALLOW -> Actions.FRAUD_ALLOW;
             case REVIEW -> Actions.FRAUD_REVIEW;
             case BLOCK -> Actions.FRAUD_BLOCK;
         };
-    }
-
-    private void rejectIdempotencyMismatch(String key, String requestHash, Actor maker) {
-        String safeKey = key.trim();
-        events.emit(Actions.IDEMPOTENCY_MISMATCH, 409, maker.id(),
-                Map.of("path", "/transfers", "key", safeKey, "payload_hash", requestHash));
-        audit.record(maker.id(), Actions.IDEMPOTENCY_MISMATCH, safeKey,
-                Map.of("payload_hash", requestHash));
-        throw new BusinessException(HttpStatus.CONFLICT, Actions.IDEMPOTENCY_MISMATCH,
-                "Idempotency-Key was already used with a different request payload");
-    }
-
-    private BusinessException notFound(String accountNo, Actor maker) {
-        events.emit(Actions.TRANSFER_NOT_FOUND, 404, maker.id(),
-                Map.of("path", "/transfers", "account", accountNo));
-        audit.record(maker.id(), Actions.TRANSFER_NOT_FOUND, accountNo, Map.of());
-        return new BusinessException(HttpStatus.NOT_FOUND, Actions.TRANSFER_NOT_FOUND,
-                "No such account: " + accountNo);
-    }
-
-    private String normalizeCurrency(TransferRequest request, Actor maker) {
-        String currency = request.currency() == null || request.currency().isBlank()
-                ? properties.getCurrency()
-                : request.currency().trim().toUpperCase(Locale.ROOT);
-        if (!currency.equalsIgnoreCase(properties.getCurrency())) {
-            events.emit(Actions.TRANSFER_UNSUPPORTED_CURRENCY, 422, maker.id(),
-                    Map.of("path", "/transfers", "currency", currency));
-            audit.record(maker.id(), Actions.TRANSFER_UNSUPPORTED_CURRENCY, currency, Map.of());
-            throw new BusinessException(HttpStatus.UNPROCESSABLE_ENTITY, Actions.TRANSFER_UNSUPPORTED_CURRENCY,
-                    "Unsupported currency: " + currency);
-        }
-        return properties.getCurrency();
-    }
-
-    private String trim(String value, String field) {
-        if (value == null || value.isBlank()) {
-            throw new BusinessException(HttpStatus.BAD_REQUEST, "validation.failed", field + " is required");
-        }
-        return value.trim();
-    }
-
-    private String newReference() {
-        String raw = UUID.randomUUID().toString().replace("-", "").substring(0, 12).toUpperCase(Locale.ROOT);
-        return "TRF-" + raw;
-    }
-
-    private TransferResponse readResponse(String body) {
-        try {
-            return mapper.readValue(body, TransferResponse.class);
-        } catch (JsonProcessingException e) {
-            throw new IllegalStateException("cached idempotent response is not readable", e);
-        }
-    }
-
-    private String writeResponse(TransferResponse response) {
-        try {
-            return mapper.writeValueAsString(response);
-        } catch (JsonProcessingException e) {
-            throw new IllegalStateException("transfer response is not serialisable", e);
-        }
     }
 }

@@ -19,14 +19,20 @@ import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
 import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer;
 import org.springframework.security.config.http.SessionCreationPolicy;
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
 import org.springframework.security.web.header.writers.ReferrerPolicyHeaderWriter;
 import org.springframework.security.web.header.writers.StaticHeadersWriter;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.jengabank.payments.auth.SessionService;
+import com.jengabank.payments.auth.TokenAuthFilter;
 import com.jengabank.payments.error.ApiError;
 import com.jengabank.payments.logging.Actions;
 import com.jengabank.payments.logging.RequestLogFilter;
+import com.jengabank.payments.logging.SecurityEventLogger;
 
 @Configuration
 @EnableWebSecurity
@@ -38,7 +44,6 @@ public class SecurityConfig {
     private static final String CSP = "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
             + "script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
 
-    /** Public GET paths: health, OpenAPI, the React app and its routes. */
     private static final String[] PUBLIC_GET = {
             "/healthz", "/readyz", "/openapi.json",
             "/", "/index.html", "/assets/**", "/icons/**", "/favicon.ico",
@@ -47,20 +52,29 @@ public class SecurityConfig {
     };
 
     private final ObjectMapper mapper;
+    private final SessionService sessions;
+    private final SecurityEventLogger events;
 
-    public SecurityConfig(ObjectMapper mapper) {
+    public SecurityConfig(ObjectMapper mapper, SessionService sessions, SecurityEventLogger events) {
         this.mapper = mapper;
+        this.sessions = sessions;
+        this.events = events;
+    }
+
+    @Bean
+    public PasswordEncoder passwordEncoder() {
+        return new BCryptPasswordEncoder(12);
     }
 
     @Bean
     public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
         http
-            // Bearer tokens in a header, no cookies: CSRF doesn't apply.
-            .csrf(AbstractHttpConfigurer::disable)
+            .csrf(AbstractHttpConfigurer::disable)          // bearer header, no cookies
             .httpBasic(AbstractHttpConfigurer::disable)
             .formLogin(AbstractHttpConfigurer::disable)
             .logout(AbstractHttpConfigurer::disable)
             .requestCache(AbstractHttpConfigurer::disable)
+            .anonymous(a -> a.authorities("ROLE_ANONYMOUS"))
             .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
             .headers(h -> h
                 .contentSecurityPolicy(c -> c.policyDirectives(CSP))
@@ -72,19 +86,23 @@ public class SecurityConfig {
                 .requestMatchers(HttpMethod.GET, PUBLIC_GET).permitAll()
                 .requestMatchers(HttpMethod.POST, "/api/v1/auth/login").permitAll()
                 .requestMatchers("/error").permitAll()
+                .requestMatchers("/api/v1/approvals/**").hasRole("CHECKER")
+                .requestMatchers(HttpMethod.POST, "/api/v1/reconciliation/runs").hasRole("CHECKER")
+                .requestMatchers("/api/v1/reconciliation/**", "/api/v1/audit/**").hasAnyRole("MAKER", "CHECKER")
+                .requestMatchers(HttpMethod.POST, "/api/v1/transfers/*/reversals").hasRole("MAKER")
+                .requestMatchers(HttpMethod.POST, "/api/v1/transfers").hasRole("CUSTOMER")
+                .requestMatchers("/api/v1/accounts/**").hasRole("CUSTOMER")
                 .requestMatchers("/api/**").authenticated()
                 .anyRequest().denyAll())
             .exceptionHandling(e -> e
                 .authenticationEntryPoint((req, res, ex) ->
                         write(res, HttpServletResponse.SC_UNAUTHORIZED, "UNAUTHENTICATED", "Sign in to continue."))
                 .accessDeniedHandler((req, res, ex) -> {
-                    log.warn("access denied", kv("action", Actions.AUTHZ_ACCESS_DENIED), kv("path", req.getRequestURI()));
+                    log.warn("access denied", kv("action", Actions.AUTHZ_ACCESS_DENIED),
+                            kv("path", req.getRequestURI()), kv("src_ip", req.getRemoteAddr()));
                     write(res, HttpServletResponse.SC_FORBIDDEN, "FORBIDDEN", "Your role can't do this.");
-                }));
-
-        // Dev 2: add the token filter here, e.g.
-        // http.addFilterBefore(tokenAuthFilter, UsernamePasswordAuthenticationFilter.class);
-        // and set request attribute RequestLogFilter.USER_ATTRIBUTE to the username.
+                }))
+            .addFilterBefore(new TokenAuthFilter(sessions, events), UsernamePasswordAuthenticationFilter.class);
 
         return http.build();
     }

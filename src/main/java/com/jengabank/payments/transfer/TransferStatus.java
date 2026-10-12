@@ -1,21 +1,20 @@
 package com.jengabank.payments.transfer;
 
-/** Lifecycle of a transfer. Only {@link #COMPLETED} moves money. */
+/** Lifecycle of a transfer. Only COMPLETED (and later REVERSED) has a journal. */
 public enum TransferStatus {
 
-    /** Fraud asked for a second pair of eyes; no journal posted yet. */
+    /** Held for a checker: over the approval threshold or flagged by fraud. No journal yet. */
     PENDING_APPROVAL,
 
-    /** Approved (or fraud-allowed) and journaled. */
+    /** Journaled: money has moved. */
     COMPLETED,
 
-    /** Fraud engine rejected it; stored as evidence, no journal. */
+    /** Fraud engine refused it; kept as evidence, no journal. */
     BLOCKED,
 
-    /** A checker rejected it; no journal. */
-    REJECTED;
+    /** A checker refused it; no journal. */
+    REJECTED,
 
-    public boolean isPosted() {
-        return this == COMPLETED;
-    }
+    /** Was COMPLETED; a reversal journal has moved the money back. */
+    REVERSED
 }

@@ -4,7 +4,6 @@ import static net.logstash.logback.argument.StructuredArguments.kv;
 
 import java.sql.SQLException;
 import java.util.List;
-import java.util.Map;
 
 import jakarta.validation.ConstraintViolationException;
 
@@ -30,7 +29,6 @@ import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 import com.jengabank.payments.logging.Actions;
 import com.jengabank.payments.logging.RequestLogFilter;
-import com.jengabank.payments.logging.SecurityEventLogger;
 
 /**
  * Turns every exception into { code, message, requestId }.
@@ -41,13 +39,6 @@ public class GlobalExceptionHandler {
 
     private static final Logger log = LoggerFactory.getLogger("security");
 
-    private final SecurityEventLogger events;
-
-    public GlobalExceptionHandler(SecurityEventLogger events) {
-        this.events = events;
-    }
-
-    /** The throwing code has already emitted the precise security event, so only render the body here. */
     @ExceptionHandler(BusinessException.class)
     public ResponseEntity<ApiError> business(BusinessException ex) {
         return body(ex.status(), ex.code(), ex.getMessage(), ex.reasons());
@@ -136,7 +127,6 @@ public class GlobalExceptionHandler {
     private ResponseEntity<ApiError> serverError(Exception ex) {
         // Full detail goes to our logs only, never to the client.
         log.error("unhandled error", kv("action", Actions.SERVER_ERROR), ex);
-        events.emit(Actions.SERVER_ERROR, 500, null, Map.of("error", ex.getClass().getSimpleName()));
         return body(HttpStatus.INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", "The server hit a problem. Try again in a moment.");
     }
 

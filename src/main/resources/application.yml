@@ -1,41 +1,104 @@
+# JengaBank Payments (APP04)
+# Every secret and connection detail comes from environment variables.
+# Check the Image Submission Guide for the exact variable names JengaSec injects
+# and map them here (e.g. DB_URL: ${THEIR_NAME}).
+
 server:
-  port: ${SERVER_PORT:8080}
+  port: ${PORT:8080}
+  shutdown: graceful
+  forward-headers-strategy: none          # src_ip = the address our app actually sees
+  error:
+    include-stacktrace: never
+    include-message: never
+    include-binding-errors: never
+    include-exception: false
+    whitelabel:
+      enabled: false
+  tomcat:
+    max-http-form-post-size: 16KB
+    max-swallow-size: 16KB
+    connection-timeout: 10s
+  max-http-request-header-size: 16KB
 
 spring:
   application:
     name: jengabank-payments
+  main:
+    banner-mode: off
+  threads:
+    virtual:
+      enabled: true
+  lifecycle:
+    timeout-per-shutdown-phase: 10s
+
   datasource:
-    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/jengabank}
-    username: ${SPRING_DATASOURCE_USERNAME:jenga}
-    password: ${SPRING_DATASOURCE_PASSWORD:jenga}
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/jengabank_payments}
+    username: ${DB_USER:jengabank}
+    password: ${DB_PASSWORD:}
     hikari:
       maximum-pool-size: 10
+      minimum-idle: 2
+      connection-timeout: 3000
+      validation-timeout: 2000
+      max-lifetime: 1200000
+      pool-name: jengabank
+
   flyway:
     enabled: true
     locations: classpath:db/migration
-    baseline-on-migrate: true
+    clean-disabled: true
+    validate-on-migrate: true
+    baseline-on-migrate: false
+
   jackson:
+    time-zone: UTC
     serialization:
       write-dates-as-timestamps: false
+    deserialization:
+      fail-on-unknown-properties: true      # reject unknown fields (API rule)
+      fail-on-null-for-primitives: true
+      accept-float-as-int: false            # 12.5 is not a valid amountMinor
 
-app:
-  currency: KES
-  settlement-account-no: "9000"
-  # Transaction limits (minor units; 100 minor units = 1.00 KES)
-  per-transfer-limit-minor: 50000000     # 500,000.00 KES
-  hourly-limit-minor: 100000000          # 1,000,000.00 KES
-  daily-limit-minor: 200000000           # 2,000,000.00 KES
-  weekly-limit-minor: 1000000000         # 10,000,000.00 KES
-  structuring-ratio: 0.95                # >= 95% of per-transfer limit = structuring signal
-  # Fraud rules
-  odd-hour-start: 23                     # UTC; start == end disables the odd-hours rule
-  odd-hour-end: 5
-  large-amount-new-payee-minor: 10000000 # 100,000.00 KES
-  max-blocked-transfers-24h: 3
-  # End-of-day reconciliation
-  reconciliation-cron: "0 0 2 * * *"
+  mvc:
+    problemdetails:
+      enabled: false                         # we use our own { code, message, requestId }
+  web:
+    resources:
+      add-mappings: true                     # serves the React app from /static
+
+springdoc:
+  api-docs:
+    path: /openapi.json
+  swagger-ui:
+    enabled: false                           # no interactive console for attackers
+  show-actuator: false
 
 logging:
   level:
     root: INFO
-    com.jengabank.payments: INFO
+    org.springframework.security: WARN
+    org.flywaydb: INFO
+
+# Business limits (server-side, never trusted from the client). Amounts in cents.
+jengabank:
+  limits:
+    max-per-transfer-minor: 100000000        # KES 1,000,000
+    daily-total-minor: 200000000             # KES 2,000,000 per customer per day
+    velocity-max-transfers: 5                # per user...
+    velocity-window-seconds: 60              # ...per minute
+  approval:
+    threshold-minor: 25000000                # KES 250,000 and above needs a checker
+  fraud:
+    zone: Africa/Nairobi                     # odd-hours rule uses local time
+    odd-hour-start: 23                       # 23:00-05:00 goes to review; start == end disables it
+    odd-hour-end: 5
+    large-amount-new-payee-minor: 10000000   # KES 100,000+ to someone you've never paid: review
+    structuring-ratio: 0.95                  # within 5% under the per-transfer cap: review
+    max-blocked-transfers-24h: 3             # this many blocked attempts in 24h: block the next
+  auth:
+    max-failed-logins: 5
+    lockout-minutes: 15
+    token-ttl-minutes: 30
+  reconciliation:
+    cron: "0 0 23 * * *"                     # 23:00 every day
+    zone: Africa/Nairobi
