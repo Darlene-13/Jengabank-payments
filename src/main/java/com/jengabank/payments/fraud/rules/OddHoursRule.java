@@ -1,6 +1,6 @@
 package com.jengabank.payments.fraud.rules;
 
-import com.jengabank.payments.config.AppProperties;
+import com.jengabank.payments.config.JengaProperties;
 import com.jengabank.payments.fraud.FraudContext;
 import com.jengabank.payments.fraud.FraudFinding;
 import com.jengabank.payments.fraud.FraudRule;
@@ -15,9 +15,9 @@ import org.springframework.stereotype.Component;
 @Component
 public class OddHoursRule implements FraudRule {
 
-    private final AppProperties properties;
+    private final JengaProperties properties;
 
-    public OddHoursRule(AppProperties properties) {
+    public OddHoursRule(JengaProperties properties) {
         this.properties = properties;
     }
 
@@ -28,15 +28,15 @@ public class OddHoursRule implements FraudRule {
 
     @Override
     public FraudFinding check(FraudContext context) {
-        int start = normalize(properties.getOddHourStart());
-        int end = normalize(properties.getOddHourEnd());
+        int start = normalize(properties.fraud().oddHourStart());
+        int end = normalize(properties.fraud().oddHourEnd());
         if (start == end) {
             return null;
         }
-        int hour = context.hourOfDay();
+        int hour = context.localHour();
         boolean inWindow = start < end ? (hour >= start && hour < end) : (hour >= start || hour < end);
         if (inWindow) {
-            return FraudFinding.review("transfer attempted at hour " + hour + " UTC");
+            return FraudFinding.review("transfer attempted at hour " + hour + " local time");
         }
         return null;
     }

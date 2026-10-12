@@ -1,50 +1,68 @@
 package com.jengabank.payments.logging;
 
+import static net.logstash.logback.argument.StructuredArguments.kv;
+
+import java.io.IOException;
+import java.util.UUID;
+import java.util.regex.Pattern;
+
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
-import java.io.IOException;
-import java.util.Map;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
 
 /**
- * Structured access log: one {@code http.request} JSON line per request with the
- * JengaSec key set, plus request-scoped src_ip/method/path for every security
- * event emitted while handling that request.
+ * Runs before Spring Security, so even rejected (401/403) requests get logged.
+ * Sets the request ID used in every log line and every error body.
+ * One JSON line per request: ts, src_ip, method, path, status, user, action.
  */
 @Component
 @Order(Ordered.HIGHEST_PRECEDENCE)
 public class RequestLogFilter extends OncePerRequestFilter {
 
-    private final SecurityEventLogger events;
+    /** Dev 2: the token filter must set this attribute to the username once authenticated. */
+    public static final String USER_ATTRIBUTE = "jb.username";
+    public static final String REQUEST_ID_HEADER = "X-Request-Id";
+    public static final String MDC_REQUEST_ID = "requestId";
 
-    public RequestLogFilter(SecurityEventLogger events) {
-        this.events = events;
-    }
+    private static final Logger log = LoggerFactory.getLogger("http");
+    // Only accept safe client IDs, so nobody can inject junk into our logs.
+    private static final Pattern SAFE_ID = Pattern.compile("^[A-Za-z0-9-]{8,64}$");
 
     @Override
-    protected void doFilterInternal(HttpServletRequest request,
-                                    HttpServletResponse response,
-                                    FilterChain filterChain) throws ServletException, IOException {
-        String forwarded = request.getHeader("X-Forwarded-For");
-        String srcIp = (forwarded != null && !forwarded.isBlank())
-                ? forwarded.split(",")[0].trim()
-                : request.getRemoteAddr();
-        events.bind(srcIp, request.getMethod(), request.getRequestURI());
-        long started = System.nanoTime();
+    protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain)
+            throws ServletException, IOException {
+
+        String incoming = request.getHeader(REQUEST_ID_HEADER);
+        String requestId = (incoming != null && SAFE_ID.matcher(incoming).matches())
+                ? incoming
+                : UUID.randomUUID().toString();
+
+        MDC.put(MDC_REQUEST_ID, requestId);
+        response.setHeader(REQUEST_ID_HEADER, requestId);
+        long start = System.nanoTime();
+
         try {
-            filterChain.doFilter(request, response);
+            chain.doFilter(request, response);
         } finally {
-            long durationMs = (System.nanoTime() - started) / 1_000_000;
-            String user = request.getHeader(SecurityEventLogger.ID_HEADER);
-            events.emit(Actions.HTTP_REQUEST, response.getStatus(),
-                    user == null || user.isBlank() ? "anonymous" : user,
-                    Map.of("duration_ms", durationMs));
-            events.unbind();
+            Object user = request.getAttribute(USER_ATTRIBUTE);
+            log.info("request",
+                    kv("src_ip", request.getRemoteAddr()),
+                    kv("method", request.getMethod()),
+                    kv("path", request.getRequestURI()),
+                    kv("status", response.getStatus()),
+                    kv("user", user == null ? "-" : user.toString()),
+                    kv("action", Actions.HTTP_REQUEST),
+                    kv("duration_ms", (System.nanoTime() - start) / 1_000_000));
+            MDC.remove(MDC_REQUEST_ID);
         }
     }
 }

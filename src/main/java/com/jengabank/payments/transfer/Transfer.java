@@ -1,23 +1,38 @@
 package com.jengabank.payments.transfer;
 
-import com.jengabank.payments.fraud.FraudDecision;
-import java.time.Instant;
+import java.time.OffsetDateTime;
 import java.util.List;
+import java.util.UUID;
 
+import com.jengabank.payments.fraud.FraudDecision;
+
+/** One row of {@code transfers}, joined with account numbers and usernames. */
 public record Transfer(
-        Long id,
-        String reference,
-        String sourceAccountNo,
-        String targetAccountNo,
-        String sourceOwnerId,
-        String targetOwnerId,
+        UUID id,
+        UUID fromAccountId,
+        String fromAccountNumber,
+        UUID fromOwnerId,
+        UUID toAccountId,
+        String toAccountNumber,
+        UUID toOwnerId,
         long amountMinor,
         String currency,
+        String reference,
         TransferStatus status,
         FraudDecision fraudDecision,
         List<String> fraudReasons,
-        String createdBy,
-        String decidedBy,
-        Instant createdAt,
-        Instant decidedAt) {
+        UUID journalId,
+        UUID reversalJournalId,
+        UUID createdBy,
+        String createdByUsername,
+        OffsetDateTime createdAt,
+        UUID decidedBy,
+        String decidedByUsername,
+        OffsetDateTime decidedAt,
+        String rejectionReason) {
+
+    /** Customers see a transfer only if one side is their account. Staff see all. */
+    public boolean visibleTo(UUID userId) {
+        return userId.equals(fromOwnerId) || userId.equals(toOwnerId);
+    }
 }

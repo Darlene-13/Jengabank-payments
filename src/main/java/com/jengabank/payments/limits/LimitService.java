@@ -1,82 +1,62 @@
 package com.jengabank.payments.limits;
 
-import com.jengabank.payments.config.AppProperties;
-import java.sql.Timestamp;
-import java.time.Instant;
-import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
+
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
+import com.jengabank.payments.config.JengaProperties;
+
 /**
- * Rolling transaction limits.
+ * Server-side transaction limits, per customer.
  *
- * <p>Defence against "limit bypass through decomposition": the check never looks
- * at the current transfer alone, it queries the {@code transfers} table for the
- * owner's total outbound volume over the last hour, 24 hours and 7 days, then
- * adds the attempted amount. Splitting a 1M KES transfer into twenty 50K KES
- * transfers trips the cumulative velocity rule on the transfer that crosses it.
- *
- * <p>PENDING_APPROVAL transfers count towards the windows (queued money is still
- * committed money), BLOCKED and REJECTED ones do not.
+ * <p>Defence against limit bypass by splitting: the daily check never looks at the
+ * current transfer alone. It adds it to everything the customer sent in the last
+ * 24 hours (rolling, so midnight doesn't reset it). PENDING_APPROVAL counts, since
+ * queued money is still committed money; BLOCKED and REJECTED don't.
  */
 @Service
 public class LimitService {
 
+    /** What the customer has done recently. Also feeds the fraud rules. */
+    public record Usage(long last24hMinor, int recentCount) {}
+
     private final JdbcTemplate jdbc;
-    private final AppProperties properties;
+    private final JengaProperties.Limits limits;
 
-    public LimitService(JdbcTemplate jdbc, AppProperties properties) {
+    public LimitService(JdbcTemplate jdbc, JengaProperties properties) {
         this.jdbc = jdbc;
-        this.properties = properties;
+        this.limits = properties.limits();
     }
 
-    /** Cumulative outbound volume for {@code ownerId} over the three windows. */
-    public WindowTotals totals(String ownerId, Instant now) {
-        return jdbc.queryForObject(
-                "SELECT "
-                        + " COALESCE(SUM(amount_minor) FILTER (WHERE created_at >= ?), 0) AS hourly, "
-                        + " COALESCE(SUM(amount_minor) FILTER (WHERE created_at >= ?), 0) AS daily, "
-                        + " COALESCE(SUM(amount_minor) FILTER (WHERE created_at >= ?), 0) AS weekly "
-                        + "FROM transfers "
-                        + "WHERE source_owner_id = ? "
-                        + "AND status IN ('COMPLETED', 'PENDING_APPROVAL')",
-                (rs, rowNum) -> new WindowTotals(rs.getLong(1), rs.getLong(2), rs.getLong(3)),
-                Timestamp.from(now.minus(1, ChronoUnit.HOURS)),
-                Timestamp.from(now.minus(24, ChronoUnit.HOURS)),
-                Timestamp.from(now.minus(7, ChronoUnit.DAYS)),
-                ownerId);
+    public Usage usage(UUID userId) {
+        return jdbc.queryForObject("""
+                SELECT COALESCE(SUM(amount_minor) FILTER (
+                           WHERE created_at >= now() - interval '24 hours'
+                             AND status IN ('COMPLETED', 'PENDING_APPROVAL')), 0) AS last24h,
+                       COUNT(*) FILTER (WHERE created_at >= now() - make_interval(secs => ?)) AS recent
+                  FROM transfers
+                 WHERE created_by = ? AND created_at >= now() - interval '24 hours'
+                """,
+                (rs, n) -> new Usage(rs.getLong("last24h"), rs.getInt("recent")),
+                limits.velocityWindowSeconds(), userId);
     }
 
-    /** Empty violations list means the transfer is within every limit. */
-    public List<LimitViolation> check(WindowTotals totals, long amountMinor) {
+    /** Empty list = within every limit. */
+    public List<LimitViolation> check(Usage usage, long amountMinor) {
         List<LimitViolation> violations = new ArrayList<>();
-
-        long perTransfer = properties.getPerTransferLimitMinor();
-        if (amountMinor > perTransfer) {
-            violations.add(new LimitViolation("per_transfer", perTransfer, amountMinor));
+        if (amountMinor > limits.maxPerTransferMinor()) {
+            violations.add(new LimitViolation("per_transfer", limits.maxPerTransferMinor(), amountMinor));
         }
-
-        long hourly = totals.hourlyMinor() + amountMinor;
-        if (hourly > properties.getHourlyLimitMinor()) {
-            violations.add(new LimitViolation("1h", properties.getHourlyLimitMinor(), hourly));
+        long projected = usage.last24hMinor() + amountMinor;
+        if (projected > limits.dailyTotalMinor()) {
+            violations.add(new LimitViolation("daily_total", limits.dailyTotalMinor(), projected));
         }
-
-        long daily = totals.dailyMinor() + amountMinor;
-        if (daily > properties.getDailyLimitMinor()) {
-            violations.add(new LimitViolation("24h", properties.getDailyLimitMinor(), daily));
+        if (usage.recentCount() >= limits.velocityMaxTransfers()) {
+            violations.add(new LimitViolation("velocity", limits.velocityMaxTransfers(), usage.recentCount() + 1L));
         }
-
-        long weekly = totals.weeklyMinor() + amountMinor;
-        if (weekly > properties.getWeeklyLimitMinor()) {
-            violations.add(new LimitViolation("7d", properties.getWeeklyLimitMinor(), weekly));
-        }
-
         return violations;
-    }
-
-    public List<LimitViolation> check(String ownerId, long amountMinor, Instant now) {
-        return check(totals(ownerId, now), amountMinor);
     }
 }

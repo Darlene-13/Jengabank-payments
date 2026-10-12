@@ -6,7 +6,7 @@ import com.jengabank.payments.fraud.FraudRule;
 import org.springframework.stereotype.Component;
 
 /**
- * Cumulative velocity guard: money moved in the last hour or the last 24 hours
+ * Cumulative velocity guard: money moved in the last 24 hours
  * is counted, so splitting one large transfer into many small ones cannot slip
  * past the daily appetite.
  */
@@ -20,15 +20,9 @@ public class VelocityRule implements FraudRule {
 
     @Override
     public FraudFinding check(FraudContext context) {
-        long hourlyLimit = context.hourlyLimitMinor();
         long dailyLimit = context.dailyLimitMinor();
-        long projectedHour = context.amountLastHourMinor() + context.amountMinor();
         long projectedDay = context.amountLast24hMinor() + context.amountMinor();
 
-        if (hourlyLimit > 0 && projectedHour > hourlyLimit) {
-            return FraudFinding.block(
-                    "projected 1h volume " + projectedHour + " exceeds hourly limit " + hourlyLimit);
-        }
         if (dailyLimit > 0 && projectedDay >= dailyLimit) {
             return FraudFinding.block(
                     "projected 24h volume " + projectedDay + " reaches daily limit " + dailyLimit);

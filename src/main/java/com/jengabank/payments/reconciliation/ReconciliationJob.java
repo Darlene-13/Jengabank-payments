@@ -5,7 +5,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
-/** End-of-day job: proves the ledger balances while the bank sleeps. */
+/** End-of-day job: proves the books balance while the bank sleeps. */
 @Component
 public class ReconciliationJob {
 
@@ -17,13 +17,12 @@ public class ReconciliationJob {
         this.service = service;
     }
 
-    @Scheduled(cron = "${app.reconciliation-cron:0 0 2 * * *}")
+    @Scheduled(cron = "${jengabank.reconciliation.cron}", zone = "${jengabank.reconciliation.zone}")
     public void endOfDay() {
         try {
-            ReconciliationReport report = service.run("scheduler");
-            log.info("end-of-day reconciliation {} in {} ms", report.status(), report.durationMs());
-        } catch (Exception e) {
-            log.error("end-of-day reconciliation failed to run", e);
+            service.run(null, "system");
+        } catch (RuntimeException e) {
+            log.error("end-of-day reconciliation could not run", e);
         }
     }
 }
