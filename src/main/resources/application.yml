@@ -23,6 +23,9 @@ server:
 spring:
   application:
     name: jengabank-payments
+  config:
+    # Local runs pick up DB_PASSWORD from ./.env. Absent in the image, so it changes nothing there.
+    import: optional:file:.env[.properties]
   main:
     banner-mode: off
   threads:
