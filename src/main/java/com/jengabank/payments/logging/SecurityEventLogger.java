@@ -85,17 +85,9 @@ public class SecurityEventLogger {
         ServletRequestAttributes attrs = (ServletRequestAttributes) RequestContextHolder.getRequestAttributes();
         if (attrs != null) {
             HttpServletRequest request = attrs.getRequest();
-            return new RequestInfo(sourceIp(request), request.getMethod(), request.getRequestURI());
+            return new RequestInfo(request.getRemoteAddr(), request.getMethod(), request.getRequestURI());
         }
         return new RequestInfo("-", "-", "-");
-    }
-
-    private String sourceIp(HttpServletRequest request) {
-        String forwarded = request.getHeader("X-Forwarded-For");
-        if (forwarded != null && !forwarded.isBlank()) {
-            return forwarded.split(",")[0].trim();
-        }
-        return request.getRemoteAddr();
     }
 
     private record RequestInfo(String srcIp, String method, String path) {
