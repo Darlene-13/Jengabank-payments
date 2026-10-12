@@ -6,9 +6,9 @@
 # ---------- 1. Frontend (React) ----------
 FROM --platform=$BUILDPLATFORM node:22-slim AS web
 WORKDIR /web
-COPY frontend/package.json frontend/package-lock.json ./
+COPY jenga-frontend/package.json jenga-frontend/package-lock.json ./
 RUN npm ci --no-audit --no-fund
-COPY frontend/ ./
+COPY jenga-frontend/ ./
 RUN npm run build
 
 # ---------- 2. Backend (Maven) ----------
