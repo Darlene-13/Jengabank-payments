@@ -1,6 +1,6 @@
 package com.jengabank.payments.fraud.rules;
 
-import com.jengabank.payments.config.AppProperties;
+import com.jengabank.payments.config.JengaProperties;
 import com.jengabank.payments.fraud.FraudContext;
 import com.jengabank.payments.fraud.FraudFinding;
 import com.jengabank.payments.fraud.FraudRule;
@@ -16,9 +16,9 @@ import org.springframework.stereotype.Component;
 @Component
 public class FailedAttemptsRule implements FraudRule {
 
-    private final AppProperties properties;
+    private final JengaProperties properties;
 
-    public FailedAttemptsRule(AppProperties properties) {
+    public FailedAttemptsRule(JengaProperties properties) {
         this.properties = properties;
     }
 
@@ -29,7 +29,7 @@ public class FailedAttemptsRule implements FraudRule {
 
     @Override
     public FraudFinding check(FraudContext context) {
-        int threshold = properties.getMaxBlockedTransfers24h();
+        int threshold = properties.fraud().maxBlockedTransfers24h();
         if (threshold >= 0 && context.blockedLast24h() >= threshold) {
             return FraudFinding.block(
                     context.blockedLast24h() + " blocked transfers in the last 24h (threshold " + threshold + ")");

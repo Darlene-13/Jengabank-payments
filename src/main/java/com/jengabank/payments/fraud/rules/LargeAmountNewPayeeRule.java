@@ -1,6 +1,6 @@
 package com.jengabank.payments.fraud.rules;
 
-import com.jengabank.payments.config.AppProperties;
+import com.jengabank.payments.config.JengaProperties;
 import com.jengabank.payments.fraud.FraudContext;
 import com.jengabank.payments.fraud.FraudFinding;
 import com.jengabank.payments.fraud.FraudRule;
@@ -13,9 +13,9 @@ import org.springframework.stereotype.Component;
 @Component
 public class LargeAmountNewPayeeRule implements FraudRule {
 
-    private final AppProperties properties;
+    private final JengaProperties properties;
 
-    public LargeAmountNewPayeeRule(AppProperties properties) {
+    public LargeAmountNewPayeeRule(JengaProperties properties) {
         this.properties = properties;
     }
 
@@ -26,11 +26,10 @@ public class LargeAmountNewPayeeRule implements FraudRule {
 
     @Override
     public FraudFinding check(FraudContext context) {
-        long threshold = properties.getLargeAmountNewPayeeMinor();
+        long threshold = properties.fraud().largeAmountNewPayeeMinor();
         if (context.newPayee() && context.amountMinor() >= threshold) {
             return FraudFinding.review(
-                    "first payment of " + context.amountMinor() + " to new payee "
-                            + context.targetOwner() + " (threshold " + threshold + ")");
+                    "first payment of " + context.amountMinor() + " to a new payee (threshold " + threshold + ")");
         }
         return null;
     }

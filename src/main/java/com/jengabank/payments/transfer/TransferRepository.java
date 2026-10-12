@@ -1,136 +1,169 @@
 package com.jengabank.payments.transfer;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.jengabank.payments.fraud.FraudDecision;
-import java.sql.Timestamp;
-import java.time.Instant;
+import java.time.OffsetDateTime;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.UUID;
+
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Repository;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.jengabank.payments.fraud.FraudDecision;
+
 @Repository
 public class TransferRepository {
 
-    private static final String SELECT_JOIN =
-            "SELECT t.id, t.reference, sa.account_no AS source_account_no, "
-                    + "ta.account_no AS target_account_no, "
-                    + "t.source_owner_id, t.target_owner_id, "
-                    + "t.amount_minor, t.currency, t.status, t.fraud_decision, "
-                    + "t.fraud_reasons::text AS fraud_reasons, t.created_by, t.decided_by, "
-                    + "t.created_at, t.decided_at "
-                    + "FROM transfers t "
-                    + "JOIN accounts sa ON sa.id = t.source_account_id "
-                    + "JOIN accounts ta ON ta.id = t.target_account_id ";
+    private static final String SELECT = """
+            SELECT t.id, t.from_account_id, fa.account_number AS from_number, fa.owner_id AS from_owner,
+                   t.to_account_id, ta.account_number AS to_number, ta.owner_id AS to_owner,
+                   t.amount_minor, t.currency, t.reference, t.status, t.fraud_decision,
+                   t.fraud_reasons::text AS fraud_reasons, t.journal_id, t.reversal_journal_id,
+                   t.created_by, cu.username AS created_by_username, t.created_at,
+                   t.decided_by, du.username AS decided_by_username, t.decided_at, t.rejection_reason
+              FROM transfers t
+              JOIN accounts fa ON fa.id = t.from_account_id
+              JOIN accounts ta ON ta.id = t.to_account_id
+              JOIN users cu ON cu.id = t.created_by
+              LEFT JOIN users du ON du.id = t.decided_by
+            """;
 
     private final JdbcTemplate jdbc;
-    private final ObjectMapper json;
+    private final ObjectMapper mapper;
+    private final RowMapper<Transfer> rowMapper;
 
     public TransferRepository(JdbcTemplate jdbc, ObjectMapper mapper) {
         this.jdbc = jdbc;
-        this.json = mapper;
+        this.mapper = mapper;
+        this.rowMapper = (rs, n) -> new Transfer(
+                rs.getObject("id", UUID.class),
+                rs.getObject("from_account_id", UUID.class),
+                rs.getString("from_number"),
+                rs.getObject("from_owner", UUID.class),
+                rs.getObject("to_account_id", UUID.class),
+                rs.getString("to_number"),
+                rs.getObject("to_owner", UUID.class),
+                rs.getLong("amount_minor"),
+                rs.getString("currency"),
+                rs.getString("reference"),
+                TransferStatus.valueOf(rs.getString("status")),
+                rs.getString("fraud_decision") == null ? null : FraudDecision.valueOf(rs.getString("fraud_decision")),
+                readReasons(rs.getString("fraud_reasons")),
+                rs.getObject("journal_id", UUID.class),
+                rs.getObject("reversal_journal_id", UUID.class),
+                rs.getObject("created_by", UUID.class),
+                rs.getString("created_by_username"),
+                rs.getObject("created_at", OffsetDateTime.class),
+                rs.getObject("decided_by", UUID.class),
+                rs.getString("decided_by_username"),
+                rs.getObject("decided_at", OffsetDateTime.class),
+                rs.getString("rejection_reason"));
     }
 
-    private final RowMapper<Transfer> transferRowMapper = (rs, rowNum) -> new Transfer(
-            rs.getLong("id"),
-            rs.getString("reference"),
-            rs.getString("source_account_no"),
-            rs.getString("target_account_no"),
-            rs.getString("source_owner_id"),
-            rs.getString("target_owner_id"),
-            rs.getLong("amount_minor"),
-            rs.getString("currency"),
-            TransferStatus.valueOf(rs.getString("status")),
-            FraudDecision.valueOf(rs.getString("fraud_decision")),
-            readReasons(rs.getString("fraud_reasons")),
-            rs.getString("created_by"),
-            rs.getString("decided_by"),
-            toInstant(rs.getTimestamp("created_at")),
-            toInstant(rs.getTimestamp("decided_at")));
-
-    public Long insert(String reference, Long sourceAccountId, Long targetAccountId,
-                       String sourceOwnerId, String targetOwnerId, long amountMinor, String currency,
-                       TransferStatus status, FraudDecision decision, List<String> reasons,
-                       String createdBy) {
-        return jdbc.queryForObject(
-                "INSERT INTO transfers (reference, source_account_id, target_account_id, "
-                        + "source_owner_id, target_owner_id, amount_minor, currency, status, "
-                        + "fraud_decision, fraud_reasons, created_by) "
-                        + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?) RETURNING id",
-                Long.class,
-                reference, sourceAccountId, targetAccountId, sourceOwnerId, targetOwnerId,
-                amountMinor, currency, status.name(), decision.name(), reasonsJson(reasons), createdBy);
+    /** Serialises one customer's transfer creation, so two parallel requests can't both pass the limits. */
+    public void lockUser(UUID userId) {
+        jdbc.query("SELECT pg_advisory_xact_lock(hashtext('jengabank.transfers:' || ?::text))",
+                rs -> null, userId);
     }
 
-    public Optional<Transfer> findById(Long id) {
-        return first(jdbc.query(SELECT_JOIN + "WHERE t.id = ?", transferRowMapper, id));
+    public UUID insert(UUID from, UUID to, long amountMinor, String reference, TransferStatus status,
+                       FraudDecision decision, List<String> reasons, UUID journalId, UUID createdBy) {
+        return jdbc.queryForObject("""
+                INSERT INTO transfers (from_account_id, to_account_id, amount_minor, reference, status,
+                                       fraud_decision, fraud_reasons, journal_id, created_by)
+                VALUES (?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?) RETURNING id
+                """, UUID.class, from, to, amountMinor, reference, status.name(), decision.name(),
+                json(reasons), journalId, createdBy);
     }
 
-    public Optional<Transfer> findByIdForUpdate(Long id) {
-        return first(jdbc.query(SELECT_JOIN + "WHERE t.id = ? FOR UPDATE OF t", transferRowMapper, id));
+    public Optional<Transfer> find(UUID id) {
+        return jdbc.query(SELECT + " WHERE t.id = ?", rowMapper, id).stream().findFirst();
     }
 
-    public Optional<Transfer> findByReference(String reference) {
-        return first(jdbc.query(SELECT_JOIN + "WHERE t.reference = ?", transferRowMapper, reference));
+    public Optional<Transfer> findForUpdate(UUID id) {
+        return jdbc.query(SELECT + " WHERE t.id = ? FOR UPDATE OF t", rowMapper, id).stream().findFirst();
     }
 
-    public void markApproved(Long id, String checkerId) {
-        jdbc.update(
-                "UPDATE transfers SET status = 'COMPLETED', decided_by = ?, decided_at = now() WHERE id = ?",
-                checkerId, id);
+    /**
+     * Newest first. {@code visibleTo} null = staff (everything); otherwise only transfers
+     * touching one of that customer's accounts.
+     */
+    public List<Transfer> page(UUID visibleTo, TransferStatus status, OffsetDateTime beforeTs, UUID beforeId, int limit) {
+        StringBuilder sql = new StringBuilder(SELECT).append(" WHERE TRUE");
+        List<Object> args = new ArrayList<>();
+        if (visibleTo != null) {
+            sql.append(" AND (fa.owner_id = ? OR ta.owner_id = ?)");
+            args.add(visibleTo);
+            args.add(visibleTo);
+        }
+        if (status != null) {
+            sql.append(" AND t.status = ?");
+            args.add(status.name());
+        }
+        if (beforeTs != null) {
+            sql.append(" AND (t.created_at, t.id) < (?, ?)");
+            args.add(beforeTs);
+            args.add(beforeId);
+        }
+        sql.append(" ORDER BY t.created_at DESC, t.id DESC LIMIT ?");
+        args.add(limit);
+        return jdbc.query(sql.toString(), rowMapper, args.toArray());
     }
 
-    public void markRejected(Long id, String checkerId) {
-        jdbc.update(
-                "UPDATE transfers SET status = 'REJECTED', decided_by = ?, decided_at = now() WHERE id = ?",
-                checkerId, id);
+    public boolean hasPaidBefore(UUID userId, UUID toAccountId) {
+        return Boolean.TRUE.equals(jdbc.queryForObject("""
+                SELECT EXISTS (SELECT 1 FROM transfers
+                                WHERE created_by = ? AND to_account_id = ? AND status IN ('COMPLETED', 'REVERSED'))
+                """, Boolean.class, userId, toAccountId));
     }
 
-    public long countTransfersBetween(String sourceOwnerId, String targetOwnerId) {
-        Long count = jdbc.query(
-                "SELECT COUNT(*) FROM transfers WHERE source_owner_id = ? AND target_owner_id = ?",
-                rs -> rs.next() ? rs.getLong(1) : null,
-                sourceOwnerId, targetOwnerId);
-        return count == null ? 0L : count;
+    public int blockedInLast24h(UUID userId) {
+        Integer count = jdbc.queryForObject("""
+                SELECT COUNT(*) FROM transfers
+                 WHERE created_by = ? AND status = 'BLOCKED' AND created_at >= now() - interval '24 hours'
+                """, Integer.class, userId);
+        return count == null ? 0 : count;
     }
 
-    public long countBlockedSince(String ownerId, Instant since) {
-        Long count = jdbc.query(
-                "SELECT COUNT(*) FROM transfers WHERE source_owner_id = ? AND status = 'BLOCKED' AND created_at >= ?",
-                rs -> rs.next() ? rs.getLong(1) : null,
-                ownerId, Timestamp.from(since));
-        return count == null ? 0L : count;
+    public void markCompleted(UUID id, UUID journalId, UUID checkerId) {
+        jdbc.update("""
+                UPDATE transfers SET status = 'COMPLETED', journal_id = ?, decided_by = ?, decided_at = now()
+                 WHERE id = ? AND status = 'PENDING_APPROVAL'
+                """, journalId, checkerId, id);
     }
 
-    public List<Transfer> findByStatus(String status) {
-        return jdbc.query(SELECT_JOIN + "WHERE t.status = ? ORDER BY t.id", transferRowMapper, status);
+    public void markRejected(UUID id, UUID checkerId, String reason) {
+        jdbc.update("""
+                UPDATE transfers SET status = 'REJECTED', rejection_reason = ?, decided_by = ?, decided_at = now()
+                 WHERE id = ? AND status = 'PENDING_APPROVAL'
+                """, reason, checkerId, id);
     }
 
-    public String reasonsJson(List<String> reasons) {
+    public void markReversed(UUID id, UUID reversalJournalId) {
+        jdbc.update("UPDATE transfers SET status = 'REVERSED', reversal_journal_id = ? WHERE id = ? AND status = 'COMPLETED'",
+                reversalJournalId, id);
+    }
+
+    private String json(List<String> reasons) {
         try {
-            return json.writeValueAsString(reasons == null ? List.of() : reasons);
+            return mapper.writeValueAsString(reasons == null ? List.of() : reasons);
         } catch (JsonProcessingException e) {
-            return "[]";
+            throw new IllegalStateException(e);
         }
     }
 
-    private List<String> readReasons(String jsonString) {
-        if (jsonString == null || jsonString.isBlank()) return List.of();
-        try {
-            return json.readValue(jsonString, new TypeReference<List<String>>() {});
-        } catch (JsonProcessingException e) {
-            return List.of(jsonString);
+    private List<String> readReasons(String json) {
+        if (json == null || json.isBlank()) {
+            return List.of();
         }
-    }
-
-    private static Optional<Transfer> first(List<Transfer> rows) {
-        return rows.stream().findFirst();
-    }
-
-    private static Instant toInstant(Timestamp timestamp) {
-        return timestamp == null ? null : timestamp.toInstant();
+        try {
+            return mapper.readValue(json, new TypeReference<List<String>>() {});
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("fraud_reasons is not a JSON array", e);
+        }
     }
 }

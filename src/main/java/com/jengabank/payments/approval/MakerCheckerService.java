@@ -1,274 +1,141 @@
 package com.jengabank.payments.approval;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.jengabank.payments.account.Account;
-import com.jengabank.payments.account.AccountRepository;
+import java.time.OffsetDateTime;
+import java.time.format.DateTimeParseException;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
 import com.jengabank.payments.audit.AuditService;
-import com.jengabank.payments.auth.Actor;
+import com.jengabank.payments.audit.RefusalException;
+import com.jengabank.payments.auth.AuthenticatedUser;
+import com.jengabank.payments.common.Cursors;
+import com.jengabank.payments.common.Page;
 import com.jengabank.payments.error.BusinessException;
-import com.jengabank.payments.idempotency.IdempotencyRecord;
 import com.jengabank.payments.idempotency.IdempotencyService;
+import com.jengabank.payments.ledger.LedgerRepository;
 import com.jengabank.payments.ledger.LedgerService;
 import com.jengabank.payments.logging.Actions;
 import com.jengabank.payments.logging.SecurityEventLogger;
 import com.jengabank.payments.transfer.Transfer;
+import com.jengabank.payments.transfer.TransferDtos.TransferDto;
 import com.jengabank.payments.transfer.TransferRepository;
 import com.jengabank.payments.transfer.TransferStatus;
-import java.time.Clock;
-import java.util.List;
-import java.util.Map;
-import java.util.Optional;
-import org.springframework.http.HttpStatus;
-import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 
+/**
+ * Checker decisions on transfers waiting for approval. The person who created a
+ * transfer can never decide it: checked here, and again by a CHECK constraint in V1.
+ */
 @Service
 public class MakerCheckerService {
 
     private final TransferRepository transfers;
-    private final AccountRepository accounts;
+    private final LedgerRepository accounts;
     private final LedgerService ledger;
     private final IdempotencyService idempotency;
     private final AuditService audit;
     private final SecurityEventLogger events;
-    private final ObjectMapper mapper;
-    private final Clock clock;
 
-    public MakerCheckerService(TransferRepository transfers,
-                               AccountRepository accounts,
-                               LedgerService ledger,
-                               IdempotencyService idempotency,
-                               AuditService audit,
-                               SecurityEventLogger events,
-                               ObjectMapper mapper,
-                               Clock clock) {
+    public MakerCheckerService(TransferRepository transfers, LedgerRepository accounts, LedgerService ledger,
+                               IdempotencyService idempotency, AuditService audit, SecurityEventLogger events) {
         this.transfers = transfers;
         this.accounts = accounts;
         this.ledger = ledger;
         this.idempotency = idempotency;
         this.audit = audit;
         this.events = events;
-        this.mapper = mapper;
-        this.clock = clock;
+    }
+
+    public Page<TransferDto> pending(String cursor, Integer limit) {
+        int lim = Cursors.limit(limit);
+        OffsetDateTime beforeTs = null;
+        UUID beforeId = null;
+        String raw = Cursors.decode(cursor);
+        if (raw != null) {
+            String[] parts = raw.split("\\|", 2);
+            if (parts.length != 2) {
+                throw Cursors.invalid();
+            }
+            try {
+                beforeTs = OffsetDateTime.parse(parts[0]);
+                beforeId = UUID.fromString(parts[1]);
+            } catch (DateTimeParseException | IllegalArgumentException e) {
+                throw Cursors.invalid();
+            }
+        }
+        Page<Transfer> page = Page.of(transfers.page(null, TransferStatus.PENDING_APPROVAL, beforeTs, beforeId, lim + 1),
+                lim, t -> t.createdAt() + "|" + t.id());
+        return new Page<>(page.items().stream().map(TransferDto::of).toList(), page.nextCursor());
     }
 
     @Transactional
-    public ApprovalResponse approve(Long transferId, Actor checker, String idempotencyKey) {
-        requireChecker(checker, "/approvals/" + transferId + "/approve");
-        requireIdempotencyKey(idempotencyKey, checker, "/approvals/" + transferId + "/approve");
+    public ResponseEntity<Object> approve(AuthenticatedUser checker, UUID transferId, String idempotencyKey) {
+        String path = "/api/v1/approvals/" + transferId + "/approve";
+        IdempotencyService.Start idem = idempotency.begin(checker, idempotencyKey, "POST", path, Map.of());
+        if (idem.isReplay()) {
+            return idem.replay();
+        }
+        Transfer t = requirePending(checker, transferId);
 
-        ApprovalResponse replay = replayIfCached(idempotencyKey, approvalHash("approve", transferId, checker), checker);
-        if (replay != null) {
-            return replay;
+        if (accounts.lock(t.fromAccountId(), t.toAccountId()).stream().anyMatch(a -> !a.isActive())) {
+            throw BusinessException.rule("ACCOUNT_NOT_ACTIVE", "One of these accounts can't send or receive money right now.");
+        }
+        long balance = accounts.balance(t.fromAccountId());
+        if (balance < t.amountMinor()) {
+            events.warn(Actions.TRANSFER_INSUFFICIENT_FUNDS, "username", checker.username(), "transfer_id", transferId,
+                    "stage", "approval");
+            throw new RefusalException(HttpStatus.UNPROCESSABLE_ENTITY, "INSUFFICIENT_FUNDS",
+                    "The sender no longer has enough money for this transfer. It stays pending.", List.of(),
+                    checker.username(), Actions.TRANSFER_INSUFFICIENT_FUNDS, "transfer:" + transferId,
+                    Map.of("stage", "approval", "amount_minor", t.amountMinor()));
         }
 
-        Transfer transfer = requireForUpdate(transferId);
+        UUID journalId = ledger.postTransfer(t.fromAccountId(), t.toAccountId(), t.amountMinor(),
+                t.reference().isEmpty() ? "Transfer to " + t.toAccountNumber() : t.reference(), checker.id());
+        transfers.markCompleted(transferId, journalId, checker.id());
 
-        if (transfer.status() != TransferStatus.PENDING_APPROVAL) {
-            return replayOrConflict(transfer, checker, idempotencyKey, "approve");
-        }
-        if (checker.is(transfer.createdBy())) {
-            rejectSelfApproval(transfer, checker);
-        }
-
-        lockAndVerifyFunds(transfer, checker, "/approvals/" + transferId + "/approve");
-
-        transfers.markApproved(transferId, checker.id());
-        Transfer decided = transfers.findById(transferId).orElseThrow();
-        ledger.post(decided);
-
-        ApprovalResponse response = toResponse(decided, "transfer approved and journaled");
-        audit.record(checker.id(), Actions.APPROVAL_APPROVE, decided.reference(), Map.of(
-                "transfer_id", transferId,
-                "maker", decided.createdBy(),
-                "checker", checker.id(),
-                "amount_minor", decided.amountMinor()));
-        events.emit(Actions.APPROVAL_APPROVE, 200, checker.id(), Map.of(
-                "path", "/approvals/" + transferId + "/approve",
-                "transfer_id", transferId,
-                "reference", decided.reference(),
-                "maker", decided.createdBy(),
-                "amount_minor", decided.amountMinor()));
-        remember(idempotencyKey, approvalHash("approve", transferId, checker), 200, response);
-        return response;
+        audit.record(checker.username(), Actions.APPROVAL_APPROVED, "transfer:" + transferId,
+                Map.of("maker", t.createdByUsername(), "amount_minor", t.amountMinor(), "journal_id", journalId));
+        events.info(Actions.APPROVAL_APPROVED, "username", checker.username(), "transfer_id", transferId,
+                "maker", t.createdByUsername(), "amount_minor", t.amountMinor());
+        events.info(Actions.TRANSFER_COMPLETED, "username", checker.username(), "transfer_id", transferId);
+        return idempotency.complete(idem, HttpStatus.OK, TransferDto.of(transfers.find(transferId).orElseThrow()));
     }
 
     @Transactional
-    public ApprovalResponse reject(Long transferId, Actor checker, String idempotencyKey) {
-        requireChecker(checker, "/approvals/" + transferId + "/reject");
-        requireIdempotencyKey(idempotencyKey, checker, "/approvals/" + transferId + "/reject");
-
-        ApprovalResponse replay = replayIfCached(idempotencyKey, approvalHash("reject", transferId, checker), checker);
-        if (replay != null) {
-            return replay;
+    public ResponseEntity<Object> reject(AuthenticatedUser checker, UUID transferId, String reason, String idempotencyKey) {
+        String path = "/api/v1/approvals/" + transferId + "/reject";
+        IdempotencyService.Start idem = idempotency.begin(checker, idempotencyKey, "POST", path, Map.of("reason", reason));
+        if (idem.isReplay()) {
+            return idem.replay();
         }
+        Transfer t = requirePending(checker, transferId);
+        transfers.markRejected(transferId, checker.id(), reason.trim());
 
-        Transfer transfer = requireForUpdate(transferId);
-
-        if (transfer.status() != TransferStatus.PENDING_APPROVAL) {
-            return replayOrConflict(transfer, checker, idempotencyKey, "reject");
-        }
-        if (checker.is(transfer.createdBy())) {
-            rejectSelfApproval(transfer, checker);
-        }
-
-        transfers.markRejected(transferId, checker.id());
-        Transfer decided = transfers.findById(transferId).orElseThrow();
-
-        ApprovalResponse response = toResponse(decided, "transfer rejected; no journal posted");
-        audit.record(checker.id(), Actions.APPROVAL_REJECT, decided.reference(), Map.of(
-                "transfer_id", transferId,
-                "maker", decided.createdBy(),
-                "checker", checker.id(),
-                "amount_minor", decided.amountMinor()));
-        events.emit(Actions.APPROVAL_REJECT, 200, checker.id(), Map.of(
-                "path", "/approvals/" + transferId + "/reject",
-                "transfer_id", transferId,
-                "reference", decided.reference(),
-                "maker", decided.createdBy(),
-                "amount_minor", decided.amountMinor()));
-        remember(idempotencyKey, approvalHash("reject", transferId, checker), 200, response);
-        return response;
+        audit.record(checker.username(), Actions.APPROVAL_REJECTED, "transfer:" + transferId,
+                Map.of("maker", t.createdByUsername(), "amount_minor", t.amountMinor(), "reason", reason.trim()));
+        events.info(Actions.APPROVAL_REJECTED, "username", checker.username(), "transfer_id", transferId,
+                "maker", t.createdByUsername());
+        return idempotency.complete(idem, HttpStatus.OK, TransferDto.of(transfers.find(transferId).orElseThrow()));
     }
 
-    public List<Transfer> pending() {
-        return transfers.findByStatus(TransferStatus.PENDING_APPROVAL.name());
-    }
-
-    private void requireChecker(Actor checker, String path) {
-        if (!checker.role().canApproveTransfer()) {
-            events.emit(Actions.AUTH_FORBIDDEN, 403, checker.id(),
-                    Map.of("path", path, "reason", "requires_role_CHECKER"));
-            throw new BusinessException(HttpStatus.FORBIDDEN, Actions.AUTH_FORBIDDEN,
-                    "Only CHECKER or ADMIN may decide on transfers");
+    private Transfer requirePending(AuthenticatedUser checker, UUID transferId) {
+        Transfer t = transfers.findForUpdate(transferId).orElseThrow(BusinessException::notFound);
+        if (t.status() != TransferStatus.PENDING_APPROVAL) {
+            throw BusinessException.conflict("NOT_PENDING", "This transfer has already been decided.");
         }
-    }
-
-    private void requireIdempotencyKey(String idempotencyKey, Actor checker, String path) {
-        if (idempotencyKey == null || idempotencyKey.isBlank()) {
-            events.emit(Actions.REQUEST_INVALID, 400, checker.id(),
-                    Map.of("path", path, "reason", "missing_idempotency_key"));
-            throw new BusinessException(HttpStatus.BAD_REQUEST, Actions.REQUEST_INVALID,
-                    "Idempotency-Key header is required for money-changing requests");
+        if (checker.id().equals(t.createdBy())) {
+            events.warn(Actions.APPROVAL_SELF_APPROVAL_DENIED, "username", checker.username(), "transfer_id", transferId);
+            throw new RefusalException(HttpStatus.FORBIDDEN, "SELF_APPROVAL",
+                    "You can't approve or reject a transfer you created.", List.of(),
+                    checker.username(), Actions.APPROVAL_SELF_APPROVAL_DENIED, "transfer:" + transferId,
+                    Map.of("maker", t.createdByUsername()));
         }
-    }
-
-    private Transfer requireForUpdate(Long transferId) {
-        return transfers.findByIdForUpdate(transferId).orElseThrow(() -> {
-            events.emit(Actions.TRANSFER_NOT_FOUND, 404, "system",
-                    Map.of("transfer_id", transferId));
-            return new BusinessException(HttpStatus.NOT_FOUND, Actions.TRANSFER_NOT_FOUND,
-                    "No such transfer: " + transferId);
-        });
-    }
-
-    private void rejectSelfApproval(Transfer transfer, Actor checker) {
-        events.emit(Actions.APPROVAL_SELF_APPROVAL, 403, checker.id(), Map.of(
-                "path", "/approvals/" + transfer.id() + "/approve",
-                "transfer_id", transfer.id(),
-                "reference", transfer.reference(),
-                "maker", transfer.createdBy(),
-                "checker", checker.id()));
-        audit.record(checker.id(), Actions.APPROVAL_SELF_APPROVAL, transfer.reference(), Map.of(
-                "transfer_id", transfer.id(),
-                "maker", transfer.createdBy(),
-                "checker", checker.id()));
-        throw new BusinessException(HttpStatus.FORBIDDEN, Actions.APPROVAL_SELF_APPROVAL,
-                "Maker " + transfer.createdBy() + " cannot approve their own transfer");
-    }
-
-    private void lockAndVerifyFunds(Transfer transfer, Actor checker, String path) {
-        List<Account> locked = accounts.lockPair(transfer.sourceAccountNo(), transfer.targetAccountNo());
-        if (locked.size() < 2) {
-            throw new BusinessException(HttpStatus.NOT_FOUND, Actions.TRANSFER_NOT_FOUND,
-                    "Accounts of transfer " + transfer.id() + " are missing");
-        }
-        Account source = locked.stream()
-                .filter(a -> a.accountNo().equals(transfer.sourceAccountNo()))
-                .findFirst()
-                .orElseThrow();
-        long balance = accounts.balanceOf(source.accountNo());
-        if (balance < transfer.amountMinor()) {
-            events.emit(Actions.APPROVAL_INSUFFICIENT_FUNDS, 422, checker.id(), Map.of(
-                    "path", path,
-                    "transfer_id", transfer.id(),
-                    "balance_minor", balance,
-                    "amount_minor", transfer.amountMinor()));
-            audit.record(checker.id(), Actions.APPROVAL_INSUFFICIENT_FUNDS, transfer.reference(),
-                    Map.of("balance_minor", balance, "amount_minor", transfer.amountMinor()));
-            throw new BusinessException(HttpStatus.UNPROCESSABLE_ENTITY, Actions.APPROVAL_INSUFFICIENT_FUNDS,
-                    "Source balance " + balance + " can no longer cover " + transfer.amountMinor());
-        }
-    }
-
-    private ApprovalResponse replayOrConflict(Transfer transfer, Actor checker, String key, String operation) {
-        if (checker.is(transfer.decidedBy())) {
-            ApprovalResponse response = toResponse(transfer, "decision already recorded");
-            events.emit(Actions.IDEMPOTENCY_REPLAY, 200, checker.id(),
-                    Map.of("path", "/approvals/" + transfer.id() + "/" + operation,
-                            "transfer_id", transfer.id()));
-            return response;
-        }
-        events.emit(Actions.APPROVAL_INVALID_STATE, 409, checker.id(), Map.of(
-                "path", "/approvals/" + transfer.id() + "/" + operation,
-                "transfer_id", transfer.id(),
-                "status", transfer.status().name()));
-        throw new BusinessException(HttpStatus.CONFLICT, Actions.APPROVAL_INVALID_STATE,
-                "Transfer is " + transfer.status().name() + ", expected PENDING_APPROVAL");
-    }
-
-    private ApprovalResponse replayIfCached(String key, String hash, Actor checker) {
-        if (key == null || key.isBlank()) {
-            return null;
-        }
-        Optional<IdempotencyRecord> cached = idempotency.find(key);
-        if (cached.isEmpty()) {
-            return null;
-        }
-        IdempotencyRecord record = cached.get();
-        if (!record.requestHash().equals(hash)) {
-            events.emit(Actions.IDEMPOTENCY_MISMATCH, 409, checker.id(),
-                    Map.of("path", "/approvals", "key", key.trim()));
-            audit.record(checker.id(), Actions.IDEMPOTENCY_MISMATCH, key.trim(),
-                    Map.of("payload_hash", hash));
-            throw new BusinessException(HttpStatus.CONFLICT, Actions.IDEMPOTENCY_MISMATCH,
-                    "Idempotency-Key was already used with a different approval request");
-        }
-        events.emit(Actions.IDEMPOTENCY_REPLAY, record.responseStatus(), checker.id(),
-                Map.of("path", "/approvals", "key", key.trim(), "operation", "decision"));
-        try {
-            return mapper.readValue(record.responseBody(), ApprovalResponse.class);
-        } catch (JsonProcessingException e) {
-            throw new IllegalStateException("cached approval response is not readable", e);
-        }
-    }
-
-    private void remember(String key, String hash, int status, ApprovalResponse response) {
-        if (key == null || key.isBlank()) {
-            return;
-        }
-        try {
-            idempotency.remember(key, hash, status, mapper.writeValueAsString(response));
-        } catch (JsonProcessingException e) {
-            throw new IllegalStateException("approval response is not serialisable", e);
-        }
-    }
-
-    private String approvalHash(String operation, Long transferId, Actor checker) {
-        return idempotency.hash(operation + "|" + transferId + "|" + checker.id());
-    }
-
-    private ApprovalResponse toResponse(Transfer transfer, String message) {
-        return new ApprovalResponse(
-                transfer.id(),
-                transfer.reference(),
-                transfer.status().name(),
-                transfer.fraudDecision().name(),
-                transfer.decidedBy(),
-                transfer.amountMinor(),
-                transfer.currency(),
-                transfer.decidedAt(),
-                message);
+        return t;
     }
 }

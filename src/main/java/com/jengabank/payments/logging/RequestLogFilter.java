@@ -1,7 +1,8 @@
 package com.jengabank.payments.logging;
 
+import static net.logstash.logback.argument.StructuredArguments.kv;
+
 import java.io.IOException;
-import java.util.Map;
 import java.util.UUID;
 import java.util.regex.Pattern;
 
@@ -10,6 +11,8 @@ import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
 import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
@@ -30,14 +33,9 @@ public class RequestLogFilter extends OncePerRequestFilter {
     public static final String REQUEST_ID_HEADER = "X-Request-Id";
     public static final String MDC_REQUEST_ID = "requestId";
 
+    private static final Logger log = LoggerFactory.getLogger("http");
     // Only accept safe client IDs, so nobody can inject junk into our logs.
     private static final Pattern SAFE_ID = Pattern.compile("^[A-Za-z0-9-]{8,64}$");
-
-    private final SecurityEventLogger events;
-
-    public RequestLogFilter(SecurityEventLogger events) {
-        this.events = events;
-    }
 
     @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain)
@@ -50,27 +48,21 @@ public class RequestLogFilter extends OncePerRequestFilter {
 
         MDC.put(MDC_REQUEST_ID, requestId);
         response.setHeader(REQUEST_ID_HEADER, requestId);
-        // src_ip = the address our app actually sees. X-Forwarded-For is client-controlled.
-        events.bind(request.getRemoteAddr(), request.getMethod(), request.getRequestURI());
         long start = System.nanoTime();
 
         try {
             chain.doFilter(request, response);
         } finally {
-            events.emit(Actions.HTTP_REQUEST, response.getStatus(), user(request),
-                    Map.of("request_id", requestId,
-                           "duration_ms", (System.nanoTime() - start) / 1_000_000));
-            events.unbind();
+            Object user = request.getAttribute(USER_ATTRIBUTE);
+            log.info("request",
+                    kv("src_ip", request.getRemoteAddr()),
+                    kv("method", request.getMethod()),
+                    kv("path", request.getRequestURI()),
+                    kv("status", response.getStatus()),
+                    kv("user", user == null ? "-" : user.toString()),
+                    kv("action", Actions.HTTP_REQUEST),
+                    kv("duration_ms", (System.nanoTime() - start) / 1_000_000));
             MDC.remove(MDC_REQUEST_ID);
         }
-    }
-
-    private static String user(HttpServletRequest request) {
-        Object user = request.getAttribute(USER_ATTRIBUTE);
-        if (user != null) {
-            return user.toString();
-        }
-        // Until Dev 2's token filter lands, the maker-checker layer still reads this header.
-        return request.getHeader(SecurityEventLogger.ID_HEADER);
     }
 }
