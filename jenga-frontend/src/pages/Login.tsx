@@ -66,7 +66,7 @@ export default function Login() {
           draw
           className="voucher-in pointer-events-none absolute -bottom-56 -right-56 text-note opacity-80"
         />
-        <div className="relative max-w-md">
+        <div className="relative my-auto max-w-md">
           <p className="text-[2.6rem] font-semibold leading-[1.1] tracking-tight text-white">
             Every shilling is written twice.
           </p>
@@ -74,7 +74,6 @@ export default function Login() {
             Once where it leaves, once where it lands. If the two sides ever disagree, we know before you do.
           </p>
         </div>
-        <p className="relative text-sm text-on-rail/60">Made-up data for JengaSec 2026. No real accounts.</p>
       </section>
 
       <section className="flex items-center justify-center px-6 py-12">
