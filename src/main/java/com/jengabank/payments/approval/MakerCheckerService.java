@@ -16,7 +16,6 @@ import com.jengabank.payments.transfer.Transfer;
 import com.jengabank.payments.transfer.TransferRepository;
 import com.jengabank.payments.transfer.TransferStatus;
 import java.time.Clock;
-import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -57,6 +56,8 @@ public class MakerCheckerService {
     @Transactional
     public ApprovalResponse approve(Long transferId, Actor checker, String idempotencyKey) {
         requireChecker(checker, "/approvals/" + transferId + "/approve");
+        requireIdempotencyKey(idempotencyKey, checker, "/approvals/" + transferId + "/approve");
+
         ApprovalResponse replay = replayIfCached(idempotencyKey, approvalHash("approve", transferId, checker), checker);
         if (replay != null) {
             return replay;
@@ -96,6 +97,8 @@ public class MakerCheckerService {
     @Transactional
     public ApprovalResponse reject(Long transferId, Actor checker, String idempotencyKey) {
         requireChecker(checker, "/approvals/" + transferId + "/reject");
+        requireIdempotencyKey(idempotencyKey, checker, "/approvals/" + transferId + "/reject");
+
         ApprovalResponse replay = replayIfCached(idempotencyKey, approvalHash("reject", transferId, checker), checker);
         if (replay != null) {
             return replay;
@@ -139,6 +142,15 @@ public class MakerCheckerService {
                     Map.of("path", path, "reason", "requires_role_CHECKER"));
             throw new BusinessException(HttpStatus.FORBIDDEN, Actions.AUTH_FORBIDDEN,
                     "Only CHECKER or ADMIN may decide on transfers");
+        }
+    }
+
+    private void requireIdempotencyKey(String idempotencyKey, Actor checker, String path) {
+        if (idempotencyKey == null || idempotencyKey.isBlank()) {
+            events.emit(Actions.REQUEST_INVALID, 400, checker.id(),
+                    Map.of("path", path, "reason", "missing_idempotency_key"));
+            throw new BusinessException(HttpStatus.BAD_REQUEST, Actions.REQUEST_INVALID,
+                    "Idempotency-Key header is required for money-changing requests");
         }
     }
 

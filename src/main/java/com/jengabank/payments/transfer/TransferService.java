@@ -34,22 +34,6 @@ import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-/**
- * The synchronous transfer flow.
- *
- * <p>Everything that decides whether money may move runs inside one database
- * transaction, with both accounts locked ({@code SELECT ... FOR UPDATE}), so
- * race conditions cannot double-spend and the immutability triggers are never
- * worked around:
- *
- * <ol>
- *   <li>Idempotency: same key + same payload returns the cached response.</li>
- *   <li>Lock accounts, check funds and cumulative limits (422 {@code limit.exceeded}).</li>
- *   <li>Run the fraud engine: ALLOW / REVIEW / BLOCK.</li>
- *   <li>Persist with its final state; journal only when ALLOW.</li>
- *   <li>Write the audit row and emit the stdout security event.</li>
- * </ol>
- */
 @Service
 public class TransferService {
 
@@ -91,9 +75,17 @@ public class TransferService {
 
     @Transactional
     public TransferResponse create(TransferRequest request, Actor maker, String idempotencyKey) {
+        // 0. Idempotency-Key required for money-changing POST (team-plan: missing key -> 400).
+        if (idempotencyKey == null || idempotencyKey.isBlank()) {
+            events.emit(Actions.REQUEST_INVALID, 400, maker.id(),
+                    Map.of("path", "/transfers", "reason", "missing_idempotency_key"));
+            throw new BusinessException(HttpStatus.BAD_REQUEST, Actions.REQUEST_INVALID,
+                    "Idempotency-Key header is required for money-changing requests");
+        }
+
         String requestHash = idempotency.hash(request);
 
-        // 1. Idempotency
+        // 1. Idempotency replay / conflict
         Optional<IdempotencyRecord> cached = idempotency.find(idempotencyKey);
         if (cached.isPresent()) {
             IdempotencyRecord record = cached.get();
@@ -119,7 +111,7 @@ public class TransferService {
                     "Source and target account must differ");
         }
 
-        // 2. Lock both accounts (deterministic order => no deadlock), check funds.
+        // 2. Lock accounts, check funds.
         List<Account> locked = accounts.lockPair(sourceAccountNo, targetAccountNo);
         Account source = locked.stream().filter(a -> a.accountNo().equals(sourceAccountNo)).findFirst()
                 .orElseThrow(() -> notFound(sourceAccountNo, maker));
@@ -137,7 +129,7 @@ public class TransferService {
                     "Insufficient funds: balance " + balance + " < " + amount);
         }
 
-        // 3. Cumulative limits (defeats decomposition attacks).
+        // 3. Limits.
         Instant now = Instant.now(clock);
         WindowTotals totals = limits.totals(source.ownerId(), now);
         List<LimitViolation> violations = limits.check(totals, amount);
@@ -186,7 +178,7 @@ public class TransferService {
             case BLOCK -> TransferStatus.BLOCKED;
         };
 
-        // 5. Persist with the final state; journal only when money may move.
+        // 5. Persist with the final state.
         String reference = newReference();
         Long id = transfers.insert(reference, source.id(), target.id(),
                 source.ownerId(), target.ownerId(), amount, currency, status,
@@ -198,13 +190,11 @@ public class TransferService {
 
         TransferResponse response = TransferResponse.from(transfer);
 
-        // 5b. Cache the response for idempotent replays.
-        if (idempotencyKey != null && !idempotencyKey.isBlank()) {
-            int cachedStatus = status == TransferStatus.BLOCKED ? 422 : 201;
-            idempotency.remember(idempotencyKey, requestHash, cachedStatus, writeResponse(response));
-        }
+        // 5b. Idempotency cache.
+        int cachedStatus = status == TransferStatus.BLOCKED ? 422 : 201;
+        idempotency.remember(idempotencyKey, requestHash, cachedStatus, writeResponse(response));
 
-        // 5c. Audit + stdout telemetry for the fraud decision.
+        // 5c. Audit + stdout telemetry.
         Map<String, Object> decisionDetails = new LinkedHashMap<>();
         decisionDetails.put("transfer_id", transfer.id());
         decisionDetails.put("reference", reference);
@@ -216,11 +206,8 @@ public class TransferService {
         decisionDetails.put("reasons", verdict.reasons());
 
         String action = actionFor(verdict.decision());
-
-        // Persistent audit row (hash-chained by the DB trigger).
         audit.record(maker.id(), action, reference, decisionDetails);
 
-        // Stdout security event so AI defenders and judges see the decision.
         int httpStatus = switch (status) {
             case COMPLETED -> 201;
             case PENDING_APPROVAL -> 202;

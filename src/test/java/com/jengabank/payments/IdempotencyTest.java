@@ -1,16 +1,14 @@
 package com.jengabank.payments;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.http.MediaType;
 
-/**
- * Dev 3: Idempotency-Key handling - the same key with the same payload replays
- * the cached response, the same key with a different payload is a conflict.
- */
 @SpringBootTest(properties = {
         "app.odd-hour-start=12",
         "app.odd-hour-end=12",
@@ -68,16 +66,24 @@ class IdempotencyTest extends AbstractPostgresTest {
     }
 
     @Test
-    void withoutAKeyEveryRequestIsANewTransfer() throws Exception {
+    void missingIdempotencyKeyIsRejected() throws Exception {
         String source = newAccount("IDEM-S3", 10_000_000L);
         String target = newAccount("IDEM-T3", 0L);
 
-        mockMvc.perform(transferRequest(source, target, 1_000L, "maker.idem", "MAKER"))
-                .andExpect(status().isCreated());
-        mockMvc.perform(transferRequest(source, target, 1_000L, "maker.idem", "MAKER"))
-                .andExpect(status().isCreated());
+        // Build the request manually so we can omit the Idempotency-Key header.
+        String stdout = captureStdout(() ->
+                mockMvc.perform(post("/api/v1/transfers")
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .header("X-User-Id", "maker.idem")
+                                .header("X-User-Role", "MAKER")
+                                .content(mapper.writeValueAsString(
+                                        new com.jengabank.payments.transfer.TransferRequest(
+                                                source, target, 1_000L, "KES"))))
+                        .andExpect(status().isBadRequest())
+                        .andExpect(jsonPath("$.code").value("request.invalid")));
 
-        assertThat(countTransfersFrom(source)).isEqualTo(2);
-        assertThat(balanceOf(source)).isEqualTo(10_000_000L - 2_000L);
+        assertThat(stdout).contains("\"action\":\"request.invalid\"");
+        assertThat(countTransfersFrom(source)).isZero();
+        assertThat(balanceOf(source)).isEqualTo(10_000_000L);
     }
 }

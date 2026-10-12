@@ -9,6 +9,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
 import java.util.Locale;
+import java.util.UUID;
 import org.junit.jupiter.api.BeforeAll;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
@@ -61,7 +62,7 @@ abstract class AbstractPostgresTest {
     protected String newAccount(String prefix, long initialBalanceMinor) throws Exception {
         String accountNo = prefix + "-" + Long.toString(System.nanoTime(), 36).toUpperCase(Locale.ROOT);
         AccountRequest request = new AccountRequest(accountNo, prefix, prefix + " owner", initialBalanceMinor);
-        mockMvc.perform(post("/api/v1/accounts")          // <-- FIXED
+        mockMvc.perform(post("/api/v1/accounts")
                         .contentType(MediaType.APPLICATION_JSON)
                         .header("X-User-Id", "admin")
                         .header("X-User-Role", "ADMIN")
@@ -70,13 +71,18 @@ abstract class AbstractPostgresTest {
         return accountNo;
     }
 
+    /**
+     * 5-arg version auto-generates a fresh Idempotency-Key so existing tests keep
+     * working after idempotency became required on money-changing POSTs.
+     */
     protected MockHttpServletRequestBuilder transferRequest(String source, String target, long amount,
                                                             String userId, String role)
             throws com.fasterxml.jackson.core.JsonProcessingException {
-        return post("/api/v1/transfers")                  // <-- FIXED
+        return post("/api/v1/transfers")
                 .contentType(MediaType.APPLICATION_JSON)
                 .header("X-User-Id", userId)
                 .header("X-User-Role", role)
+                .header("Idempotency-Key", "auto-" + UUID.randomUUID())
                 .content(mapper.writeValueAsString(
                         new com.jengabank.payments.transfer.TransferRequest(source, target, amount, "KES")));
     }
@@ -84,7 +90,12 @@ abstract class AbstractPostgresTest {
     protected MockHttpServletRequestBuilder transferRequest(String source, String target, long amount,
                                                             String userId, String role, String idempotencyKey)
             throws com.fasterxml.jackson.core.JsonProcessingException {
-        MockHttpServletRequestBuilder builder = transferRequest(source, target, amount, userId, role);
+        MockHttpServletRequestBuilder builder = post("/api/v1/transfers")
+                .contentType(MediaType.APPLICATION_JSON)
+                .header("X-User-Id", userId)
+                .header("X-User-Role", role)
+                .content(mapper.writeValueAsString(
+                        new com.jengabank.payments.transfer.TransferRequest(source, target, amount, "KES")));
         if (idempotencyKey != null) {
             builder = builder.header("Idempotency-Key", idempotencyKey);
         }
@@ -131,6 +142,11 @@ abstract class AbstractPostgresTest {
 
     protected String statusOf(Long transferId) {
         return jdbc.queryForObject("SELECT status FROM transfers WHERE id = ?", String.class, transferId);
+    }
+
+    @FunctionalInterface
+    interface StdoutAccess {
+        void run() throws Exception;
     }
 
     @FunctionalInterface

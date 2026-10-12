@@ -43,7 +43,8 @@ class MakerCheckerTest extends AbstractPostgresTest {
                 mockMvc.perform(post("/api/v1/approvals/{id}/approve", transferId)
                                 .contentType(MediaType.APPLICATION_JSON)
                                 .header("X-User-Id", "maker.jane")
-                                .header("X-User-Role", "CHECKER"))
+                                .header("X-User-Role", "CHECKER")
+                                .header("Idempotency-Key", "self-approve-" + transferId))
                         .andExpect(status().isForbidden())
                         .andExpect(jsonPath("$.code").value("approval.self_approval_denied")));
 
@@ -127,7 +128,8 @@ class MakerCheckerTest extends AbstractPostgresTest {
         mockMvc.perform(post("/api/v1/approvals/{id}/approve", transferId)
                         .contentType(MediaType.APPLICATION_JSON)
                         .header("X-User-Id", "maker.jane")
-                        .header("X-User-Role", "MAKER"))
+                        .header("X-User-Role", "MAKER")
+                        .header("Idempotency-Key", "wrong-role-" + transferId))
                 .andExpect(status().isForbidden())
                 .andExpect(jsonPath("$.code").value("authz.access.denied"));
 
@@ -143,7 +145,8 @@ class MakerCheckerTest extends AbstractPostgresTest {
         mockMvc.perform(post("/api/v1/approvals/{id}/reject", transferId)
                         .contentType(MediaType.APPLICATION_JSON)
                         .header("X-User-Id", "checker.bob")
-                        .header("X-User-Role", "CHECKER"))
+                        .header("X-User-Role", "CHECKER")
+                        .header("Idempotency-Key", "reject-" + transferId))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("REJECTED"))
                 .andExpect(jsonPath("$.decidedBy").value("checker.bob"));
@@ -162,13 +165,15 @@ class MakerCheckerTest extends AbstractPostgresTest {
         mockMvc.perform(post("/api/v1/approvals/{id}/reject", transferId)
                         .contentType(MediaType.APPLICATION_JSON)
                         .header("X-User-Id", "checker.bob")
-                        .header("X-User-Role", "CHECKER"))
+                        .header("X-User-Role", "CHECKER")
+                        .header("Idempotency-Key", "reject-first-" + transferId))
                 .andExpect(status().isOk());
 
         mockMvc.perform(post("/api/v1/approvals/{id}/approve", transferId)
                         .contentType(MediaType.APPLICATION_JSON)
                         .header("X-User-Id", "checker.carol")
-                        .header("X-User-Role", "CHECKER"))
+                        .header("X-User-Role", "CHECKER")
+                        .header("Idempotency-Key", "approve-second-" + transferId))
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.code").value("approval.invalid_state"));
 
@@ -196,7 +201,8 @@ class MakerCheckerTest extends AbstractPostgresTest {
         mockMvc.perform(post("/api/v1/approvals/{id}/approve", transferId)
                         .contentType(MediaType.APPLICATION_JSON)
                         .header("X-User-Id", "checker.bob")
-                        .header("X-User-Role", "CHECKER"))
+                        .header("X-User-Role", "CHECKER")
+                        .header("Idempotency-Key", "audit-approve-" + transferId))
                 .andExpect(status().isOk());
 
         Long seq = jdbc.query(
