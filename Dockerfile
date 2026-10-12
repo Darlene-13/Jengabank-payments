@@ -1,8 +1,4 @@
-# syntax=docker/dockerfile:1
-# Build:  docker buildx build --platform linux/amd64 -t ghcr.io/<owner>/jengabank-payments:v1 .
-# Never tag "latest". New tag every push: v1, v2, v3...
 
-# Build stages run natively (fast on Apple Silicon); only the runtime is amd64.
 # ---------- 1. Frontend (React) ----------
 FROM --platform=$BUILDPLATFORM node:22-slim AS web
 WORKDIR /web
