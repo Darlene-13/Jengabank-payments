@@ -61,7 +61,7 @@
   --color-rail: var(--rail);
   --color-on-rail: var(--on-rail);
   --color-focus: var(--focus);
-  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "Inter Variable", "Inter", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", monospace;
 }
 
@@ -69,6 +69,8 @@ html {
   background: var(--paper);
   color: var(--ink);
   font-family: var(--font-sans);
+  font-optical-sizing: auto;
+  font-feature-settings: "cv11" 1;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
