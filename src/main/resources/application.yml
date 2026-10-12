@@ -1,0 +1,41 @@
+server:
+  port: ${SERVER_PORT:8080}
+
+spring:
+  application:
+    name: jengabank-payments
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/jengabank}
+    username: ${SPRING_DATASOURCE_USERNAME:jenga}
+    password: ${SPRING_DATASOURCE_PASSWORD:jenga}
+    hikari:
+      maximum-pool-size: 10
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+  jackson:
+    serialization:
+      write-dates-as-timestamps: false
+
+app:
+  currency: KES
+  settlement-account-no: "9000"
+  # Transaction limits (minor units; 100 minor units = 1.00 KES)
+  per-transfer-limit-minor: 50000000     # 500,000.00 KES
+  hourly-limit-minor: 100000000          # 1,000,000.00 KES
+  daily-limit-minor: 200000000           # 2,000,000.00 KES
+  weekly-limit-minor: 1000000000         # 10,000,000.00 KES
+  structuring-ratio: 0.95                # >= 95% of per-transfer limit = structuring signal
+  # Fraud rules
+  odd-hour-start: 23                     # UTC; start == end disables the odd-hours rule
+  odd-hour-end: 5
+  large-amount-new-payee-minor: 10000000 # 100,000.00 KES
+  max-blocked-transfers-24h: 3
+  # End-of-day reconciliation
+  reconciliation-cron: "0 0 2 * * *"
+
+logging:
+  level:
+    root: INFO
+    com.jengabank.payments: INFO

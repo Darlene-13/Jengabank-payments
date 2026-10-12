@@ -1,0 +1,8 @@
+
+# Dev 3 local artifacts
+.idea/
+*.log
+mvn-output.log
+mvn-test.log
+target/
+200
