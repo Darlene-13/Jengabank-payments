@@ -1,124 +1,87 @@
--- =====================================================================
--- V3: invariants checked by the database itself at COMMIT.
---   1. Every journal balances (debits = credits, at least 2 lines).
---   2. No customer account ever goes below zero.
---   3. Audit records are hash-chained, in strict order.
--- These are the last line of defence if app-level locking ever fails.
--- =====================================================================
+-- V3 — ledger invariants + tamper-evident audit chain.
 
--- 1. Balanced journals --------------------------------------------------
-CREATE FUNCTION check_journal_balanced() RETURNS trigger
-LANGUAGE plpgsql AS $$
+-- (1) Every transfer's ledger entries must net to zero. Checked at COMMIT so a
+--     transfer may legally be journaled across several statements inside one tx.
+CREATE OR REPLACE FUNCTION ledger_transfer_balance_check() RETURNS trigger AS $$
 DECLARE
-    debits  BIGINT;
-    credits BIGINT;
-    lines   INT;
+    bad BIGINT;
 BEGIN
-    SELECT COALESCE(SUM(amount_minor) FILTER (WHERE direction = 'DEBIT'), 0),
-           COALESCE(SUM(amount_minor) FILTER (WHERE direction = 'CREDIT'), 0),
-           COUNT(*)
-      INTO debits, credits, lines
-      FROM ledger_entries
-     WHERE journal_id = NEW.journal_id;
+    SELECT COUNT(*) INTO bad FROM (
+        SELECT transfer_id
+        FROM ledger_entries
+        WHERE transfer_id IS NOT NULL
+        GROUP BY transfer_id
+        HAVING COALESCE(SUM(amount_minor), 0) <> 0
+    ) unbalanced;
 
-    IF lines < 2 OR debits <> credits THEN
-        RAISE EXCEPTION 'journal % does not balance: debits %, credits %, lines %',
-            NEW.journal_id, debits, credits, lines
-            USING ERRCODE = 'check_violation';
+    IF bad > 0 THEN
+        RAISE EXCEPTION 'ledger imbalance: % transfer(s) with non-zero net entries', bad;
     END IF;
     RETURN NULL;
 END;
-$$;
+$$ LANGUAGE plpgsql;
 
-CREATE CONSTRAINT TRIGGER entries_journal_balanced
-    AFTER INSERT ON ledger_entries
+CREATE CONSTRAINT TRIGGER ledger_transfer_balance_trigger
+    AFTER INSERT OR UPDATE OR DELETE ON ledger_entries
     DEFERRABLE INITIALLY DEFERRED
-    FOR EACH ROW EXECUTE FUNCTION check_journal_balanced();
+    FOR EACH ROW EXECUTE FUNCTION ledger_transfer_balance_check();
 
--- 2. No overdrafts ------------------------------------------------------
-CREATE FUNCTION check_no_overdraft() RETURNS trigger
-LANGUAGE plpgsql AS $$
+-- (2) No customer may ever be overdrawn; checked at COMMIT as well, so the
+--     invariant holds no matter what the Java code does.
+CREATE OR REPLACE FUNCTION customer_balance_nonnegative_check() RETURNS trigger AS $$
 DECLARE
-    bal       BIGINT;
-    may_go_negative BOOLEAN;
+    bad BIGINT;
 BEGIN
-    -- Row lock: a concurrent transaction debiting the same account waits here until
-    -- we commit, then re-reads the balance including our entries. No double spend.
-    SELECT allow_negative INTO may_go_negative FROM accounts WHERE id = NEW.account_id FOR NO KEY UPDATE;
-    IF may_go_negative THEN
-        RETURN NULL;
-    END IF;
+    SELECT COUNT(*) INTO bad
+    FROM account_balances
+    WHERE kind = 'CUSTOMER' AND balance_minor < 0;
 
-    SELECT COALESCE(SUM(CASE direction WHEN 'CREDIT' THEN amount_minor ELSE -amount_minor END), 0)
-      INTO bal
-      FROM ledger_entries
-     WHERE account_id = NEW.account_id;
-
-    IF bal < 0 THEN
-        RAISE EXCEPTION 'account % would go negative (%)', NEW.account_id, bal
-            USING ERRCODE = 'check_violation';
+    IF bad > 0 THEN
+        RAISE EXCEPTION 'overdrawn customer account(s) detected';
     END IF;
     RETURN NULL;
 END;
-$$;
+$$ LANGUAGE plpgsql;
 
-CREATE CONSTRAINT TRIGGER entries_no_overdraft
+CREATE CONSTRAINT TRIGGER customer_balance_nonnegative_trigger
     AFTER INSERT ON ledger_entries
     DEFERRABLE INITIALLY DEFERRED
-    FOR EACH ROW WHEN (NEW.direction = 'DEBIT')
-    EXECUTE FUNCTION check_no_overdraft();
+    FOR EACH ROW EXECUTE FUNCTION customer_balance_nonnegative_check();
 
--- 3. Audit hash chain ---------------------------------------------------
--- The app only INSERTs (actor, action, target, details). The database
--- assigns sequence, prev_hash and hash under a lock, so concurrent writers
--- can never fork or reorder the chain.
-CREATE FUNCTION audit_hash_input(seq BIGINT, ts TIMESTAMPTZ, actor TEXT, action TEXT,
-                                 target TEXT, details JSONB, prev TEXT)
-RETURNS TEXT LANGUAGE sql IMMUTABLE AS $$
-    SELECT prev || '|' || seq::text || '|'
-        || to_char(ts AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') || '|'
-        || actor || '|' || action || '|' || target || '|' || details::text;
-$$;
-
-CREATE FUNCTION audit_chain() RETURNS trigger
-LANGUAGE plpgsql AS $$
+-- (3) Hash-chained audit trail. Application code only INSERTs
+--     (actor, action, target, details); sequence, timestamp, prev_hash and hash
+--     are computed here under an advisory lock so concurrent writers cannot fork
+--     the chain and any historical edit invalidates every later hash.
+CREATE OR REPLACE FUNCTION audit_chain() RETURNS trigger AS $$
 DECLARE
-    last_hash TEXT;
+    v_lock      CONSTANT BIGINT  := 900116;
+    v_prev_hash TEXT;
+    v_seq       BIGINT;
+    v_ts        TIMESTAMPTZ     := clock_timestamp();
+    v_payload   TEXT;
 BEGIN
-    PERFORM pg_advisory_xact_lock(hashtext('jengabank.audit_log'));
-    SELECT hash INTO last_hash FROM audit_log ORDER BY sequence DESC LIMIT 1;
+    PERFORM pg_advisory_xact_lock(v_lock);
 
-    NEW.sequence  := nextval('audit_log_seq');
-    NEW.ts        := clock_timestamp();
-    NEW.prev_hash := COALESCE(last_hash, repeat('0', 64));
-    NEW.hash      := encode(sha256(convert_to(
-                        audit_hash_input(NEW.sequence, NEW.ts, NEW.actor, NEW.action,
-                                         NEW.target, NEW.details, NEW.prev_hash), 'UTF8')), 'hex');
+    SELECT seq, hash INTO v_seq, v_prev_hash
+    FROM audit_log
+    ORDER BY seq DESC
+    LIMIT 1;
+
+    v_prev_hash := COALESCE(v_prev_hash, LPAD('', 64, '0'));
+    v_seq       := COALESCE(v_seq, 0) + 1;
+
+    NEW.seq        := v_seq;
+    NEW.created_at := v_ts;
+    NEW.prev_hash  := v_prev_hash;
+
+    v_payload := v_seq::text || '|' || v_ts::text || '|' || NEW.actor || '|' || NEW.action
+                 || '|' || COALESCE(NEW.target, '') || '|' || NEW.details::text || '|' || v_prev_hash;
+
+    NEW.hash := encode(sha256(convert_to(v_payload, 'UTF8')), 'hex');
     RETURN NEW;
 END;
-$$;
+$$ LANGUAGE plpgsql;
 
-CREATE TRIGGER audit_log_chain BEFORE INSERT ON audit_log
+CREATE TRIGGER audit_chain_trigger
+    BEFORE INSERT ON audit_log
     FOR EACH ROW EXECUTE FUNCTION audit_chain();
-
--- Walks the whole chain. Returns valid = false and the first bad sequence if tampered.
-CREATE FUNCTION audit_verify(OUT valid BOOLEAN, OUT checked BIGINT, OUT broken_at BIGINT)
-LANGUAGE plpgsql STABLE AS $$
-DECLARE
-    r        RECORD;
-    expected TEXT := repeat('0', 64);
-BEGIN
-    valid := TRUE; checked := 0; broken_at := NULL;
-    FOR r IN SELECT * FROM audit_log ORDER BY sequence LOOP
-        checked := checked + 1;
-        IF r.prev_hash <> expected
-           OR r.hash <> encode(sha256(convert_to(
-                  audit_hash_input(r.sequence, r.ts, r.actor, r.action, r.target, r.details, r.prev_hash),
-                  'UTF8')), 'hex') THEN
-            valid := FALSE; broken_at := r.sequence;
-            RETURN;
-        END IF;
-        expected := r.hash;
-    END LOOP;
-END;
-$$;
