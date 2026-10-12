@@ -7,7 +7,7 @@ export function Wordmark({ className, inverse }: { className?: string; inverse?:
       <Rosette seed="jengabank" size={30} layers={1} className={inverse ? "text-on-rail" : "text-note"} />
       <span className="leading-none">
         <span className="block text-[1.05rem] font-semibold tracking-tight">JengaBank</span>
-        <span className={cn("block text-xs", inverse ? "text-on-rail/70" : "text-muted")}>Payments</span>
+        <span className={cn("mt-1 block text-xs", inverse ? "text-on-rail/70" : "text-muted")}>Payments</span>
       </span>
     </span>
   );
