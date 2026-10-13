@@ -10,7 +10,7 @@
 
 This report records what our team submitted to the JengaSec range for APP04, how the submitted image meets each range rule, and how we verified it before submission.
 
-Our final submission is the container image `ghcr.io/darlene-13/jengabank-payments:v4`. It was built from `main` at commit `587c974`, passed the full test suite (16 unit tests and 50 integration tests), was rehearsed locally under the range's constraints, and is live on the team page. The image is private, runs as a non-root user on `linux/amd64`, and is about 109 MB.
+Our final submission is the container image `ghcr.io/darlene-13/jengabank-payments:v5`. It was built from `main` at commit `0e3a1f7`, passed the full test suite (16 unit tests and 50 integration tests), was rehearsed locally under the range's constraints, and is live on the team page. The image is private, runs as a non-root user on `linux/amd64`, and is about 109 MB.
 
 ---
 
@@ -22,7 +22,7 @@ The form was completed with the following values:
 
 | Field | Value |
 |-------|-------|
-| Image reference | `ghcr.io/darlene-13/jengabank-payments:v4` |
+| Image reference | `ghcr.io/darlene-13/jengabank-payments:v5` |
 | Registry username | `Darlene-13` |
 | Pull credential | A classic personal access token with the `read:packages` scope only, expiring after the competition |
 | Port | `8080` |
@@ -35,9 +35,9 @@ Final image record:
 
 | | |
 |---|---|
-| Tag | `v4` |
-| Digest | `sha256:1d6d1b8fb806dd3bd4225b44992bbc23ffb809afc106dd31aef20539927cd9da` |
-| Source | `main` at `587c974` (Merge pull request #14) |
+| Tag | `v5` |
+| Digest | `sha256:785f8f3a7edeb7a204cba38c231a8a60fbe59f801970546681d90d8d14357ed6` |
+| Source | `main` at `0e3a1f7` (Merge pull request #17) |
 | Platform, user, size | `linux/amd64`, `10001:10001`, about 109 MB |
 
 ---
@@ -103,7 +103,8 @@ Each release was given a new tag; no tag was ever reused or overwritten.
 | `v1` | First healthy submission. |
 | `v2` | The complete feature set: double-entry ledger, transfers, maker-checker approvals, reversals, limits, fraud rules, hash-chained audit trail, end-of-day reconciliation and structured security logging. Digest `sha256:f32421a3f2c69ba394d5467f2d73beb7830aa0a89b07505d547417425b41437b`. |
 | `v3` | Security events for rejected requests now always name the user, and role-based access denials are logged as `authz.access.denied`. The image build now caches Maven dependencies. |
-| `v4` | A round-trip fraud rule, based on work by Lucy Njenga: if the account being paid sent the customer money in the last hour, the transfer is held for a checker instead of completing. |
+| `v4` | A round-trip fraud rule, based on work by Lucy Njenga: if the account being paid sent the customer money in the last hour, the transfer is held for a checker instead of completing. Digest `sha256:1d6d1b8fb806dd3bd4225b44992bbc23ffb809afc106dd31aef20539927cd9da`. |
+| `v5` | Fixes from the internal pentest: the Content-Security-Policy no longer allows inline styles (`style-src 'self'`), and a database trigger rejects any statement that changes more than one user's password. |
 
 ---
 
@@ -148,6 +149,6 @@ Neither token was placed in chat, in a commit or in any file. If either one leak
 
 ## Conclusion
 
-The submitted image, `v4`, meets every JengaSec rule and was tested and rehearsed under the range's constraints before submission. Its core design principle is that money safety is enforced twice: once in the application, and again in the database through constraints and triggers. Every security-relevant decision is visible in the logs. Together, these give the team a solid foundation for the live defence.
+The submitted image, `v5`, meets every JengaSec rule, passed the full test suite, and was built and run under the same constraints rehearsed for earlier releases. Its core design principle is that money safety is enforced twice: once in the application, and again in the database through constraints and triggers. Every security-relevant decision is visible in the logs. Together, these give the team a solid foundation for the live defence.
 
 *Written by Darlene Wendy, Build Lead, JengaBank Payments.*
