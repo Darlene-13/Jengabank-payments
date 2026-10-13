@@ -1,34 +1,38 @@
 package com.jengabank.payments.auth;
 
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicInteger;
-
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 
-/** Max N login attempts per IP per minute, on top of per-account lockout. In memory, one instance. */
+/**
+ * Max N login attempts per IP per fixed 60s window, on top of per-account lockout.
+ * Counted in the database (V6__login_rate_limits.sql), not in process memory, so the
+ * limit holds even if requests from the same IP land on different app instances.
+ */
 @Component
 public class LoginRateLimiter {
 
-    private static final long WINDOW_MS = 60_000;
-    private static final int MAX_TRACKED_IPS = 10_000;
-
-    private record Window(long start, AtomicInteger count) {}
-
-    private final ConcurrentHashMap<String, Window> windows = new ConcurrentHashMap<>();
+    private final JdbcTemplate jdbc;
     private final int maxPerMinute;
 
-    public LoginRateLimiter(@Value("${jengabank.auth.login-rate-per-minute:10}") int maxPerMinute) {
+    public LoginRateLimiter(JdbcTemplate jdbc, @Value("${jengabank.auth.login-rate-per-minute:10}") int maxPerMinute) {
+        this.jdbc = jdbc;
         this.maxPerMinute = maxPerMinute;
     }
 
     public boolean allow(String ip) {
-        long now = System.currentTimeMillis();
-        if (windows.size() > MAX_TRACKED_IPS) {
-            windows.clear(); // stops a memory-exhaustion attack with spoofed sources
-        }
-        Window w = windows.compute(ip, (k, old) ->
-                (old == null || now - old.start() > WINDOW_MS) ? new Window(now, new AtomicInteger()) : old);
-        return w.count().incrementAndGet() <= maxPerMinute;
+        int count = jdbc.queryForObject("""
+                INSERT INTO login_rate_limits (ip_address, window_start, attempt_count)
+                VALUES (?, now(), 1)
+                ON CONFLICT (ip_address) DO UPDATE SET
+                    attempt_count = CASE WHEN login_rate_limits.window_start <= now() - INTERVAL '60 seconds'
+                                         THEN 1
+                                         ELSE login_rate_limits.attempt_count + 1 END,
+                    window_start  = CASE WHEN login_rate_limits.window_start <= now() - INTERVAL '60 seconds'
+                                         THEN now()
+                                         ELSE login_rate_limits.window_start END
+                RETURNING attempt_count
+                """, Integer.class, ip);
+        return count <= maxPerMinute;
     }
 }

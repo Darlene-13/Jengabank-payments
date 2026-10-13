@@ -31,6 +31,7 @@ import com.jengabank.payments.auth.SessionService;
 import com.jengabank.payments.auth.TokenAuthFilter;
 import com.jengabank.payments.error.ApiError;
 import com.jengabank.payments.logging.Actions;
+import com.jengabank.payments.logging.ClientIpResolver;
 import com.jengabank.payments.logging.RequestLogFilter;
 import com.jengabank.payments.logging.SecurityEventLogger;
 
@@ -54,11 +55,14 @@ public class SecurityConfig {
     private final ObjectMapper mapper;
     private final SessionService sessions;
     private final SecurityEventLogger events;
+    private final ClientIpResolver clientIp;
 
-    public SecurityConfig(ObjectMapper mapper, SessionService sessions, SecurityEventLogger events) {
+    public SecurityConfig(ObjectMapper mapper, SessionService sessions, SecurityEventLogger events,
+                           ClientIpResolver clientIp) {
         this.mapper = mapper;
         this.sessions = sessions;
         this.events = events;
+        this.clientIp = clientIp;
     }
 
     @Bean
@@ -99,10 +103,10 @@ public class SecurityConfig {
                         write(res, HttpServletResponse.SC_UNAUTHORIZED, "UNAUTHENTICATED", "Sign in to continue."))
                 .accessDeniedHandler((req, res, ex) -> {
                     log.warn("access denied", kv("action", Actions.AUTHZ_ACCESS_DENIED),
-                            kv("path", req.getRequestURI()), kv("src_ip", req.getRemoteAddr()));
+                            kv("path", req.getRequestURI()), kv("src_ip", clientIp.resolve(req)));
                     write(res, HttpServletResponse.SC_FORBIDDEN, "FORBIDDEN", "Your role can't do this.");
                 }))
-            .addFilterBefore(new TokenAuthFilter(sessions, events), UsernamePasswordAuthenticationFilter.class);
+            .addFilterBefore(new TokenAuthFilter(sessions, events, clientIp), UsernamePasswordAuthenticationFilter.class);
 
         return http.build();
     }

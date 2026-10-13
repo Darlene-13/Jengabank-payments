@@ -15,7 +15,7 @@ server:
     whitelabel:
       enabled: false
   tomcat:
-    max-http-form-post-size: 16KB
+    max-http-form-post-size: 16KB  # only form-urlencoded bodies; see jengabank.security.max-request-bytes for JSON
     max-swallow-size: 16KB
     connection-timeout: 10s
   max-http-request-header-size: 16KB
@@ -84,6 +84,18 @@ logging:
 
 # Business limits (server-side, never trusted from the client). Amounts in cents.
 jengabank:
+  security:
+    # Comma-separated IPs/IPv4 CIDRs of our OWN reverse proxy/ingress, if any (e.g. "10.0.0.1" or
+    # "10.0.0.0/8"). X-Forwarded-For/X-Real-IP are only read when the TCP peer is one of these;
+    # anyone else's forwarded headers are ignored and request.getRemoteAddr() is used instead.
+    # Empty (default) = never trust them, since there's nothing in front of the container locally.
+    trusted-proxies: ${TRUSTED_PROXIES:}
+    # Team API rule: 16 KB max request size. server.tomcat.max-http-form-post-size (below)
+    # only caps application/x-www-form-urlencoded bodies, NOT our JSON API requests, so this
+    # is the limit that actually applies to every endpoint (see RequestSizeLimitFilter).
+    max-request-bytes: 16384
+    # Organiser rule: rate limit expensive/search/export operations too, not just auth.
+    account-entries-rate-per-minute: 30
   limits:
     max-per-transfer-minor: 100000000        # KES 1,000,000
     daily-total-minor: 200000000             # KES 2,000,000 per customer per day

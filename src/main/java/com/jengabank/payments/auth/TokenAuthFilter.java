@@ -17,6 +17,7 @@ import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.filter.OncePerRequestFilter;
 
 import com.jengabank.payments.logging.Actions;
+import com.jengabank.payments.logging.ClientIpResolver;
 import com.jengabank.payments.logging.RequestLogFilter;
 import com.jengabank.payments.logging.SecurityEventLogger;
 
@@ -30,10 +31,12 @@ public class TokenAuthFilter extends OncePerRequestFilter {
 
     private final SessionService sessions;
     private final SecurityEventLogger events;
+    private final ClientIpResolver clientIp;
 
-    public TokenAuthFilter(SessionService sessions, SecurityEventLogger events) {
+    public TokenAuthFilter(SessionService sessions, SecurityEventLogger events, ClientIpResolver clientIp) {
         this.sessions = sessions;
         this.events = events;
+        this.clientIp = clientIp;
     }
 
     @Override
@@ -52,7 +55,7 @@ public class TokenAuthFilter extends OncePerRequestFilter {
     }
 
     private void authenticate(String header, HttpServletRequest request) {
-        String ip = request.getRemoteAddr();
+        String ip = clientIp.resolve(request);
         String path = request.getRequestURI();
 
         if (!header.startsWith("Bearer ")) {

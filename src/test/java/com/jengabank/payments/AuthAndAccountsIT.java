@@ -1,5 +1,6 @@
 package com.jengabank.payments;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -22,8 +23,12 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
 import com.jayway.jsonpath.JsonPath;
+import com.jengabank.payments.logging.RateLimitCleanupJob;
 
-@SpringBootTest(properties = "jengabank.auth.login-rate-per-minute=1000")
+@SpringBootTest(properties = {
+        "jengabank.auth.login-rate-per-minute=1000",
+        "jengabank.security.account-entries-rate-per-minute=3"
+})
 @AutoConfigureMockMvc
 @Testcontainers
 class AuthAndAccountsIT {
@@ -38,6 +43,7 @@ class AuthAndAccountsIT {
     @Autowired MockMvc mvc;
     @Autowired JdbcTemplate jdbc;
     @Autowired PasswordEncoder encoder;
+    @Autowired RateLimitCleanupJob cleanupJob;
 
     // ---- helpers ------------------------------------------------------------
 
@@ -176,5 +182,73 @@ class AuthAndAccountsIT {
                 .andExpect(status().isForbidden());
         mvc.perform(get("/api/v1/audit").header("Authorization", "Bearer " + token))
                 .andExpect(status().isForbidden());
+    }
+
+    @Test
+    void bodyOver16kIsRejectedBeforeItsEvenParsed() throws Exception {
+        String oversized = loginBody("x", "y".repeat(20_000));
+        mvc.perform(post("/api/v1/auth/login").contentType(MediaType.APPLICATION_JSON).content(oversized))
+                .andExpect(status().isPayloadTooLarge())
+                .andExpect(jsonPath("$.code").value("PAYLOAD_TOO_LARGE"));
+    }
+
+    @Test
+    void spoofedForwardedForDoesNotChangeTheIpUsedForRateLimiting() throws Exception {
+        // No jengabank.security.trusted-proxies configured here, so this header must be ignored:
+        // the row the rate limiter writes should key on MockMvc's real test client address, not
+        // the one an attacker claims in the header.
+        mvc.perform(post("/api/v1/auth/login").contentType(MediaType.APPLICATION_JSON)
+                        .header("X-Forwarded-For", "203.0.113.1")
+                        .content(loginBody("nobody.here", "x")));
+
+        String ip = jdbc.queryForObject(
+                "SELECT ip_address FROM login_rate_limits ORDER BY window_start DESC LIMIT 1", String.class);
+        assertThat(ip).isNotEqualTo("203.0.113.1");
+    }
+
+    @Test
+    void entriesAreRateLimitedPerUser() throws Exception {
+        // jengabank.security.account-entries-rate-per-minute=3 for this test class.
+        String user = newCustomer();
+        UUID account = createCustomer(user, 100);
+        String token = login(user);
+
+        for (int i = 0; i < 3; i++) {
+            mvc.perform(get("/api/v1/accounts/" + account + "/entries").header("Authorization", "Bearer " + token))
+                    .andExpect(status().isOk());
+        }
+        mvc.perform(get("/api/v1/accounts/" + account + "/entries").header("Authorization", "Bearer " + token))
+                .andExpect(status().isTooManyRequests())
+                .andExpect(jsonPath("$.code").value("RATE_LIMITED"));
+
+        // A different user's own calls aren't affected by the first user's limit.
+        String other = newCustomer();
+        UUID otherAccount = createCustomer(other, 100);
+        mvc.perform(get("/api/v1/accounts/" + otherAccount + "/entries").header("Authorization", "Bearer " + login(other)))
+                .andExpect(status().isOk());
+    }
+
+    @Test
+    void cleanupJobPrunesStaleWindowsButKeepsFreshOnes() {
+        // Other tests in this class also write to these tables; start from a clean slate
+        // so this test doesn't depend on execution order.
+        jdbc.update("DELETE FROM login_rate_limits");
+        jdbc.update("DELETE FROM rate_limits");
+
+        jdbc.update("INSERT INTO login_rate_limits (ip_address, window_start, attempt_count) VALUES (?, now() - INTERVAL '20 minutes', 5)",
+                "203.0.113.55");
+        jdbc.update("INSERT INTO login_rate_limits (ip_address, window_start, attempt_count) VALUES (?, now(), 2)",
+                "203.0.113.66");
+        jdbc.update("INSERT INTO rate_limits (bucket_key, window_start, attempt_count) VALUES (?, now() - INTERVAL '20 minutes', 5)",
+                "test.stale:1");
+        jdbc.update("INSERT INTO rate_limits (bucket_key, window_start, attempt_count) VALUES (?, now(), 2)",
+                "test.fresh:1");
+
+        cleanupJob.pruneStaleWindows();
+
+        assertThat(jdbc.queryForList("SELECT ip_address FROM login_rate_limits", String.class))
+                .containsExactly("203.0.113.66");
+        assertThat(jdbc.queryForList("SELECT bucket_key FROM rate_limits", String.class))
+                .containsExactly("test.fresh:1");
     }
 }
