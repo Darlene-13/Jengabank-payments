@@ -36,7 +36,7 @@ import com.jengabank.payments.logging.SecurityEventLogger;
 @EnableMethodSecurity
 public class SecurityConfig {
 
-    private static final String CSP = "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
+    private static final String CSP = "default-src 'self'; img-src 'self' data:; style-src 'self'; "
             + "script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
 
     private static final String[] PUBLIC_GET = {
