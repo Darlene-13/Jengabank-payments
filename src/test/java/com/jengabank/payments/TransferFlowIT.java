@@ -205,6 +205,20 @@ class TransferFlowIT extends AbstractApiIT {
     }
 
     @Test
+    void sendingMoneyStraightBackIsHeldForReview() throws Exception {
+        Customer alice = newCustomer(1_000_000);
+        Customer bob = newCustomer(0);
+
+        transfer(alice, bob, 100_000).andExpect(status().isCreated())
+                .andExpect(jsonPath("$.status").value("COMPLETED"));
+        transfer(bob, alice, 90_000).andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.status").value("PENDING_APPROVAL"))
+                .andExpect(jsonPath("$.fraud.decision").value("REVIEW"));
+
+        assertThat(balance(bob.accountId())).isEqualTo(100_000);
+    }
+
+    @Test
     void rejectedRequestEventsNameTheUser(CapturedOutput output) throws Exception {
         Customer alice = newCustomer(1_000_000);
         Customer bob = newCustomer(0);
