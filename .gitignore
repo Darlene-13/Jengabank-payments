@@ -20,3 +20,7 @@ target/
 
 # OS
 .DS_Store
+
+# Local-only documents
+docs/PROPOSAL-v2.docx
+docs/submission.md
