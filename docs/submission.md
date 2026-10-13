@@ -16,7 +16,7 @@ Our final submission is the container image `ghcr.io/darlene-13/jengabank-paymen
 
 ## 1. What was submitted
 
-JengaSec accepts a submission as a container image entered through the team-page form, not as an uploaded document. Our written deliverable was the project proposal (version 2, submitted on 13 October at 09:00). The repository's `README.md` and the `docs/` folder support the live defence.
+Our submission has two parts: the container image, entered through the team-page form, and this report. The proposal (version 2) was submitted earlier, on 13 October at 09:00. The repository's `README.md` and the `docs/` folder support the live defence.
 
 The form was completed with the following values:
 
@@ -36,7 +36,7 @@ Final image record:
 | | |
 |---|---|
 | Tag | `v4` |
-| Digest | `sha256:<to be filled in from the v4 push output>` |
+| Digest | `sha256:1d6d1b8fb806dd3bd4225b44992bbc23ffb809afc106dd31aef20539927cd9da` |
 | Source | `main` at `587c974` (Merge pull request #14) |
 | Platform, user, size | `linux/amd64`, `10001:10001`, about 109 MB |
 
