@@ -81,8 +81,8 @@ export default function Login() {
           <div className="mb-10 lg:hidden">
             <Wordmark />
           </div>
-          <h1 className="text-3xl font-semibold tracking-tight">Sign in</h1>
-          <p className="mt-2 text-muted">Customers and bank staff use the same sign-in.</p>
+          <h1 className="text-3xl font-semibold tracking-tight">Welcome back to the ledger</h1>
+          <p className="mt-2 text-muted">One door for customers and bank staff. Your role decides which rooms open.</p>
 
           {signOutReason && !error && (
             <p role="status" className="mt-6 border-l-4 border-rule bg-surface px-4 py-3 text-sm">
@@ -128,12 +128,12 @@ export default function Login() {
                 {show ? "Hide" : "Show"}
               </button>
             </div>
-            <Button type="submit" busy={busy} busyLabel="Signing in" className="mt-2 w-full">
-              Sign in
+            <Button type="submit" busy={busy} busyLabel="Checking your keys" className="mt-2 w-full">
+              Enter JengaBank
             </Button>
           </form>
           <p className="mt-8 text-sm text-muted">
-            For your safety we sign you out after 10 minutes without activity, and when you close or reload this page.
+            We lock the door behind you: after 10 quiet minutes, or the moment you close or reload this page.
           </p>
         </div>
       </section>

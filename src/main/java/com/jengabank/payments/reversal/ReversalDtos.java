@@ -10,10 +10,12 @@ public final class ReversalDtos {
 
     private ReversalDtos() {}
 
-    /** The reason goes on the audit trail, so it must say something (10+ characters, as in V1). */
     public record ReversalRequest(@NotBlank @Size(min = 10, max = 280) String reason) {}
 
-    public record ReversalDto(UUID id, UUID transferId, String fromAccountNumber, String toAccountNumber,
-                              long amountMinor, String reason, String status, String requestedBy,
-                              OffsetDateTime requestedAt) {}
+    public record RejectRequest(@NotBlank @Size(min = 5, max = 280) String reason) {}
+
+    public record ReversalDto(UUID id, UUID transferId, String status, String reason, long amountMinor,
+                              String fromAccountNumber, String toAccountNumber, UUID journalId,
+                              String requestedBy, OffsetDateTime requestedAt,
+                              String decidedBy, OffsetDateTime decidedAt) {}
 }

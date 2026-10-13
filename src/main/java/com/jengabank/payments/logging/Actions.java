@@ -38,6 +38,8 @@ public final class Actions {
 
     public static final String REVERSAL_CREATED = "reversal.created";
     public static final String REVERSAL_DUPLICATE_DENIED = "reversal.duplicate_denied";
+    public static final String REVERSAL_DENIED = "reversal.denied";
+    public static final String REVERSAL_PENDING_APPROVAL = "reversal.pending_approval";
 
     public static final String RECONCILIATION_PASSED = "reconciliation.passed";
     public static final String RECONCILIATION_FAILED = "reconciliation.failed";

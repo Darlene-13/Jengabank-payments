@@ -61,7 +61,7 @@ class TransferFlowIT extends AbstractApiIT {
         Customer bob = newCustomer(0);
         transfer(alice, bob.accountNumber(), 100_000, null)
                 .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.code").value("IDEMPOTENCY_KEY_REQUIRED"));
+                .andExpect(jsonPath("$.code").value("MISSING_HEADER"));
         assertThat(balance(alice.accountId())).isEqualTo(1_000_000);
     }
 
@@ -97,8 +97,9 @@ class TransferFlowIT extends AbstractApiIT {
         Customer bob = newCustomer(0);
         transfer(alice, bob, 100_000_001)
                 .andExpect(status().isUnprocessableEntity())
-                .andExpect(jsonPath("$.code").value("LIMIT_EXCEEDED"))
-                .andExpect(jsonPath("$.reasons[0]").exists());
+                .andExpect(jsonPath("$.code").value("TRANSFER_BLOCKED"))
+                .andExpect(jsonPath("$.reasons", org.hamcrest.Matchers.hasItem(
+                        org.hamcrest.Matchers.startsWith("Above the single-transfer limit"))));
     }
 
     @Test
@@ -110,21 +111,25 @@ class TransferFlowIT extends AbstractApiIT {
         }
         transfer(alice, bob, 1_000)
                 .andExpect(status().isUnprocessableEntity())
-                .andExpect(jsonPath("$.code").value("LIMIT_EXCEEDED"));
+                .andExpect(jsonPath("$.code").value("TRANSFER_BLOCKED"))
+                .andExpect(jsonPath("$.reasons", org.hamcrest.Matchers.hasItem(
+                        org.hamcrest.Matchers.startsWith("Too many transfers"))));
     }
 
     @Test
     void reachingTheDailyLimitIsBlockedAndKeptAsEvidence() throws Exception {
-        // KES 1,000,000 twice = exactly the KES 2,000,000 daily limit: the velocity rule blocks the second.
+        // Pending transfers count toward the daily total: KES 1,000,000 + 600,000 wait for a checker,
+        // then KES 500,000 more would take today to 2,100,000, over the KES 2,000,000 limit.
         Customer alice = newCustomer(100_000_000);
         Customer bob = newCustomer(0);
         transfer(alice, bob, 100_000_000).andExpect(status().isAccepted());
+        transfer(alice, bob, 60_000_000).andExpect(status().isAccepted());
 
-        transfer(alice, bob, 100_000_000)
+        transfer(alice, bob, 50_000_000)
                 .andExpect(status().isUnprocessableEntity())
-                .andExpect(jsonPath("$.code").value("FRAUD_BLOCKED"))
+                .andExpect(jsonPath("$.code").value("TRANSFER_BLOCKED"))
                 .andExpect(jsonPath("$.reasons", org.hamcrest.Matchers.hasItem(
-                        org.hamcrest.Matchers.startsWith("fraud.velocity"))));
+                        org.hamcrest.Matchers.startsWith("Above the daily limit"))));
 
         assertThat(jdbc.queryForObject(
                 "SELECT COUNT(*) FROM transfers WHERE from_account_id = ? AND status = 'BLOCKED'",
@@ -136,8 +141,8 @@ class TransferFlowIT extends AbstractApiIT {
     void unknownRecipientAndSameAccountAreRefused() throws Exception {
         Customer alice = newCustomer(1_000_000);
         transfer(alice, "999999999999", 1_000, UUID.randomUUID().toString())
-                .andExpect(status().isNotFound())
-                .andExpect(jsonPath("$.code").value("RECIPIENT_NOT_FOUND"));
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.code").value("INVALID_DESTINATION"));
         transfer(alice, alice, 1_000)
                 .andExpect(status().isUnprocessableEntity())
                 .andExpect(jsonPath("$.code").value("SAME_ACCOUNT"));
