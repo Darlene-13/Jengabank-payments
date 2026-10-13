@@ -94,6 +94,8 @@ jengabank:
     # only caps application/x-www-form-urlencoded bodies, NOT our JSON API requests, so this
     # is the limit that actually applies to every endpoint (see RequestSizeLimitFilter).
     max-request-bytes: 16384
+    # Organiser rule: rate limit expensive/search/export operations too, not just auth.
+    account-entries-rate-per-minute: 30
   limits:
     max-per-transfer-minor: 100000000        # KES 1,000,000
     daily-total-minor: 200000000             # KES 2,000,000 per customer per day
