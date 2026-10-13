@@ -4,6 +4,9 @@ import { navFor } from "./nav";
 import { Icon } from "./Icon";
 import { cn } from "../lib/cn";
 
+// Literal class names so Tailwind emits them; no inline style keeps CSP style-src 'self'.
+const COLS = ["grid-cols-1", "grid-cols-2", "grid-cols-3", "grid-cols-4", "grid-cols-5"];
+
 export function BottomNav() {
   const { user } = useAuth();
   if (!user) return null;
@@ -11,7 +14,7 @@ export function BottomNav() {
 
   return (
     <nav aria-label="Main" className="fixed inset-x-0 bottom-0 z-40 border-t border-rule bg-surface pb-[env(safe-area-inset-bottom)] md:hidden">
-      <ul className="grid" style={{ gridTemplateColumns: `repeat(${items.length}, minmax(0, 1fr))` }}>
+      <ul className={cn("grid", COLS[Math.max(items.length, 1) - 1])}>
         {items.map((n) => (
           <li key={n.to}>
             <NavLink
