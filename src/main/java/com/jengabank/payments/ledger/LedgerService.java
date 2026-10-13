@@ -1,49 +1,69 @@
 package com.jengabank.payments.ledger;
 
+import java.util.Collections;
+import java.util.List;
 import java.util.UUID;
 
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.RowCallbackHandler;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
- * Posts double-entry journals. Every journal is one DEBIT and one CREDIT of the
- * same amount, so money is only ever moved, never created. The database
- * re-checks balance and overdraft at COMMIT (V3), as the last line of defence.
- *
- * <p>Callers must already hold the account row locks (see {@link LedgerRepository#lock}).
+ * The only code that writes to the ledger. Every method must run inside the caller's transaction.
+ * The database re-checks everything at commit (balanced journal, no overdraft).
  */
 @Service
 public class LedgerService {
 
-    private static final int MAX_DESCRIPTION = 140;
+    public enum Direction { DEBIT, CREDIT }
 
-    private final LedgerRepository repository;
+    public record Line(UUID accountId, Direction direction, long amountMinor) {}
 
-    public LedgerService(LedgerRepository repository) {
-        this.repository = repository;
+    private final JdbcTemplate jdbc;
+
+    public LedgerService(JdbcTemplate jdbc) {
+        this.jdbc = jdbc;
     }
 
-    /** Money moves from {@code from} to {@code to}. Returns the journal id. */
+    /** Locks accounts in id order, so two transfers between the same accounts can never deadlock. */
     @Transactional(propagation = Propagation.MANDATORY)
-    public UUID postTransfer(UUID from, UUID to, long amountMinor, String description, UUID createdBy) {
-        UUID journalId = repository.insertJournal("TRANSFER", clip(description), null, createdBy);
-        repository.insertEntry(journalId, from, "DEBIT", amountMinor);
-        repository.insertEntry(journalId, to, "CREDIT", amountMinor);
-        return journalId;
+    public void lockAccounts(UUID... accountIds) {
+        List<UUID> ids = List.of(accountIds).stream().distinct().toList();
+        String placeholders = String.join(",", Collections.nCopies(ids.size(), "?"));
+        jdbc.query("SELECT id FROM accounts WHERE id IN (" + placeholders + ") ORDER BY id FOR NO KEY UPDATE",
+                (RowCallbackHandler) rs -> { }, ids.toArray());
     }
 
-    /** A new journal with the original entries swapped. The original is never touched. */
+    /** Derived balance: always the sum of entries. */
+    public long balance(UUID accountId) {
+        Long balance = jdbc.queryForObject("""
+                SELECT COALESCE(SUM(CASE direction WHEN 'CREDIT' THEN amount_minor ELSE -amount_minor END), 0)
+                  FROM ledger_entries WHERE account_id = ?""", Long.class, accountId);
+        return balance == null ? 0 : balance;
+    }
+
+    /** Posts one balanced journal. Returns its id. */
     @Transactional(propagation = Propagation.MANDATORY)
-    public UUID postReversal(UUID originalJournalId, UUID originalFrom, UUID originalTo, long amountMinor,
-                             String description, UUID createdBy) {
-        UUID journalId = repository.insertJournal("REVERSAL", clip(description), originalJournalId, createdBy);
-        repository.insertEntry(journalId, originalTo, "DEBIT", amountMinor);
-        repository.insertEntry(journalId, originalFrom, "CREDIT", amountMinor);
-        return journalId;
-    }
+    public UUID post(String kind, String description, UUID reversalOf, UUID createdBy, List<Line> lines) {
+        long debits = lines.stream().filter(l -> l.direction() == Direction.DEBIT).mapToLong(Line::amountMinor).sum();
+        long credits = lines.stream().filter(l -> l.direction() == Direction.CREDIT).mapToLong(Line::amountMinor).sum();
+        if (lines.size() < 2 || debits != credits) {
+            throw new IllegalStateException("Refusing to post an unbalanced journal");
+        }
 
-    private static String clip(String description) {
-        return description.length() <= MAX_DESCRIPTION ? description : description.substring(0, MAX_DESCRIPTION);
+        UUID journalId = UUID.randomUUID();
+        String safeDescription = description.length() > 140 ? description.substring(0, 140) : description;
+        jdbc.update("INSERT INTO journals (id, kind, description, reversal_of, created_by) VALUES (?, ?, ?, ?, ?)",
+                journalId, kind, safeDescription, reversalOf, createdBy);
+        jdbc.batchUpdate("INSERT INTO ledger_entries (journal_id, account_id, direction, amount_minor) VALUES (?, ?, ?, ?)",
+                lines, lines.size(), (ps, line) -> {
+                    ps.setObject(1, journalId);
+                    ps.setObject(2, line.accountId());
+                    ps.setString(3, line.direction().name());
+                    ps.setLong(4, line.amountMinor());
+                });
+        return journalId;
     }
 }

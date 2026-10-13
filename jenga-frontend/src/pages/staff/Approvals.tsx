@@ -18,6 +18,7 @@ import { LoadingRows } from "../../components/ui/Skeleton";
 import { formatDateTime } from "../../lib/dates";
 import { formatMinor } from "../../lib/money";
 import { cn } from "../../lib/cn";
+import { PendingReversals } from "./PendingReversals";
 
 type Action = "approve" | "reject" | null;
 
@@ -141,6 +142,8 @@ export default function Approvals() {
           )}
         </section>
       </div>
+
+      <PendingReversals />
 
       <Dialog open={action !== null} title={action === "approve" ? "Approve this transfer?" : "Reject this transfer?"} onClose={() => setAction(null)}>
         {selected && (

@@ -96,6 +96,8 @@ public class SecurityConfig {
                 .requestMatchers(HttpMethod.POST, "/api/v1/transfers/*/reversals").hasRole("MAKER")
                 .requestMatchers(HttpMethod.POST, "/api/v1/transfers").hasRole("CUSTOMER")
                 .requestMatchers("/api/v1/accounts/**").hasRole("CUSTOMER")
+                .requestMatchers(HttpMethod.POST, "/api/v1/reversals/*/approve", "/api/v1/reversals/*/reject").hasRole("CHECKER")
+                .requestMatchers("/api/v1/reversals/**").hasAnyRole("MAKER", "CHECKER")
                 .requestMatchers("/api/**").authenticated()
                 .anyRequest().denyAll())
             .exceptionHandling(e -> e

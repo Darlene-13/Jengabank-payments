@@ -4,7 +4,10 @@ import java.util.UUID;
 
 import jakarta.validation.Valid;
 
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -14,40 +17,57 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+import com.jengabank.payments.auth.AuthenticatedUser;
 import com.jengabank.payments.auth.CurrentUser;
 import com.jengabank.payments.common.Page;
+import com.jengabank.payments.error.BusinessException;
+import com.jengabank.payments.logging.Actions;
+import com.jengabank.payments.logging.RateLimiter;
+import com.jengabank.payments.logging.SecurityEventLogger;
 import com.jengabank.payments.transfer.TransferDtos.CreateTransferRequest;
 import com.jengabank.payments.transfer.TransferDtos.TransferDto;
 
-/**
- * POST: CUSTOMER only (SecurityConfig). 201 completed, 202 waiting for a checker,
- * 422 FRAUD_BLOCKED. GET: customers see their own transfers, staff see all.
- */
 @RestController
 @RequestMapping("/api/v1/transfers")
 public class TransferController {
 
-    private final TransferService service;
+    private static final int WINDOW_SECONDS = 60;
 
-    public TransferController(TransferService service) {
+    private final TransferService service;
+    private final RateLimiter rateLimiter;
+    private final SecurityEventLogger events;
+    private final int listRatePerMinute;
+
+    public TransferController(TransferService service, RateLimiter rateLimiter, SecurityEventLogger events,
+                              @Value("${jengabank.security.transfers-list-rate-per-minute:30}") int listRatePerMinute) {
         this.service = service;
+        this.rateLimiter = rateLimiter;
+        this.events = events;
+        this.listRatePerMinute = listRatePerMinute;
     }
 
     @PostMapping
-    public ResponseEntity<Object> create(@Valid @RequestBody CreateTransferRequest body,
-                                         @RequestHeader(name = "Idempotency-Key", required = false) String key) {
-        return service.create(CurrentUser.require(), body, key);
+    @PreAuthorize("hasRole('CUSTOMER')")
+    public ResponseEntity<?> create(@RequestHeader("Idempotency-Key") String idempotencyKey,
+                                    @Valid @RequestBody CreateTransferRequest body) {
+        return service.create(CurrentUser.require(), body, idempotencyKey);
     }
 
     @GetMapping
     public Page<TransferDto> list(@RequestParam(required = false) String status,
                                   @RequestParam(required = false) String cursor,
                                   @RequestParam(required = false) Integer limit) {
-        return service.list(CurrentUser.require(), status, cursor, limit);
+        AuthenticatedUser me = CurrentUser.require();
+        if (!rateLimiter.allow("transfers.list:" + me.id(), listRatePerMinute, WINDOW_SECONDS)) {
+            events.warn(Actions.RATE_LIMITED, "username", me.username(), "endpoint", "transfers.list");
+            throw new BusinessException(HttpStatus.TOO_MANY_REQUESTS, "RATE_LIMITED",
+                    "Too many requests. Wait a minute, then try again.");
+        }
+        return service.list(me, status, cursor, limit);
     }
 
-    @GetMapping("/{id}")
-    public TransferDto get(@PathVariable UUID id) {
-        return service.get(CurrentUser.require(), id);
+    @GetMapping("/{transferId}")
+    public TransferDto get(@PathVariable UUID transferId) {
+        return service.get(CurrentUser.require(), transferId);
     }
 }

@@ -5,91 +5,94 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
 import java.util.UUID;
+import java.util.function.Supplier;
 
-import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.jengabank.payments.auth.AuthenticatedUser;
 import com.jengabank.payments.error.BusinessException;
-import com.jengabank.payments.idempotency.IdempotencyRepository.Row;
 import com.jengabank.payments.logging.Actions;
 import com.jengabank.payments.logging.SecurityEventLogger;
 
 /**
- * Idempotency-Key for every money-changing POST. Keys are per user.
- *   same key + same request      -> the stored response is replayed, nothing runs twice
- *   same key + different request -> 409
- *   no key                       -> 400
- * Runs inside the caller's transaction: if the request fails, the key is released with it.
+ * Wraps a money-changing action so it runs at most once per (user, key).
+ *  - New key: run the action, store status and body.
+ *  - Same key, same request: replay the stored response; nothing runs again.
+ *  - Same key, different request: 409.
+ * Must run inside the caller's transaction: if the action fails, the key is rolled back too.
+ * Concurrent requests with the same key queue on the unique index and then replay.
  */
 @Service
 public class IdempotencyService {
 
-    private final IdempotencyRepository repository;
+    private record Stored(String endpoint, String requestHash, Integer statusCode, String body) {}
+
+    private final JdbcTemplate jdbc;
     private final ObjectMapper mapper;
     private final SecurityEventLogger events;
 
-    public IdempotencyService(IdempotencyRepository repository, ObjectMapper mapper, SecurityEventLogger events) {
-        this.repository = repository;
+    public IdempotencyService(JdbcTemplate jdbc, ObjectMapper mapper, SecurityEventLogger events) {
+        this.jdbc = jdbc;
         this.mapper = mapper;
         this.events = events;
     }
 
-    /**
-     * Result of {@link #begin}: either a stored response to return as-is ({@code replay} set),
-     * or a freshly claimed key to pass to {@link #complete} once the work is done.
-     */
-    public record Start(UUID userId, UUID key, ResponseEntity<Object> replay) {
-        public boolean isReplay() {
-            return replay != null;
-        }
-    }
-
     @Transactional(propagation = Propagation.MANDATORY)
-    public Start begin(AuthenticatedUser me, String rawKey, String method, String path, Object body) {
-        UUID key = parseKey(me, rawKey, path);
-        String hash = sha256(method + " " + path + " " + json(body));
+    public ResponseEntity<?> execute(AuthenticatedUser user, String rawKey, String endpoint, Object request,
+                                     Supplier<ResponseEntity<?>> action) {
+        UUID key = parseKey(rawKey);
+        String hash = sha256(endpoint + "\n" + json(request));
 
-        if (repository.claim(me.id(), key, path, hash)) {
-            return new Start(me.id(), key, null);
+        int inserted = jdbc.update("""
+                INSERT INTO idempotency_keys (user_id, idem_key, endpoint, request_hash)
+                VALUES (?, ?, ?, ?) ON CONFLICT (user_id, idem_key) DO NOTHING""",
+                user.id(), key, endpoint, hash);
+
+        if (inserted == 1) {
+            ResponseEntity<?> response = action.get();
+            jdbc.update("UPDATE idempotency_keys SET status_code = ?, response_body = ?::jsonb WHERE user_id = ? AND idem_key = ?",
+                    response.getStatusCode().value(), json(response.getBody()), user.id(), key);
+            return response;
         }
 
-        Row existing = repository.find(me.id(), key).orElseThrow();
-        if (!existing.requestHash().equals(hash) || existing.statusCode() == null) {
-            events.warn(Actions.IDEMPOTENCY_CONFLICT, "username", me.username(), "path", path, "key", key);
+        Stored stored = jdbc.queryForObject("""
+                SELECT endpoint, request_hash, status_code, response_body::text AS body
+                  FROM idempotency_keys WHERE user_id = ? AND idem_key = ?""",
+                (rs, n) -> new Stored(rs.getString("endpoint"), rs.getString("request_hash"),
+                        (Integer) rs.getObject("status_code"), rs.getString("body")),
+                user.id(), key);
+
+        if (stored == null || !stored.endpoint().equals(endpoint) || !stored.requestHash().equals(hash)) {
+            events.warn(Actions.IDEMPOTENCY_CONFLICT, "username", user.username(), "endpoint", endpoint, "key", key);
             throw BusinessException.conflict("IDEMPOTENCY_CONFLICT",
                     "This Idempotency-Key was already used for a different request.");
         }
-        events.info(Actions.IDEMPOTENCY_REPLAYED, "username", me.username(), "path", path, "key", key);
-        return new Start(me.id(), key,
-                ResponseEntity.status(existing.statusCode()).body(readTree(existing.responseBody())));
-    }
-
-    @Transactional(propagation = Propagation.MANDATORY)
-    public ResponseEntity<Object> complete(Start start, HttpStatus status, Object body) {
-        repository.complete(start.userId(), start.key(), status.value(), json(body));
-        return ResponseEntity.status(status).body(body);
-    }
-
-    private UUID parseKey(AuthenticatedUser me, String rawKey, String path) {
-        if (rawKey == null || rawKey.isBlank()) {
-            events.warn(Actions.REQUEST_INVALID, "username", me.username(), "path", path,
-                    "reason", "missing_idempotency_key");
-            throw BusinessException.badRequest("IDEMPOTENCY_KEY_REQUIRED",
-                    "Send an Idempotency-Key header (a UUID) with this request.");
+        if (stored.statusCode() == null) {
+            throw BusinessException.conflict("IDEMPOTENCY_IN_PROGRESS", "This request is still being processed. Try again in a moment.");
         }
+
+        events.info(Actions.IDEMPOTENCY_REPLAYED, "username", user.username(), "endpoint", endpoint, "key", key);
         try {
-            return UUID.fromString(rawKey.trim());
+            return ResponseEntity.status(stored.statusCode()).body(mapper.readTree(stored.body()));
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Stored response is not valid JSON", e);
+        }
+    }
+
+    private static UUID parseKey(String raw) {
+        try {
+            if (raw == null || raw.length() != 36) {
+                throw new IllegalArgumentException();
+            }
+            return UUID.fromString(raw);
         } catch (IllegalArgumentException e) {
-            events.warn(Actions.REQUEST_INVALID, "username", me.username(), "path", path,
-                    "reason", "malformed_idempotency_key");
-            throw BusinessException.badRequest("IDEMPOTENCY_KEY_INVALID", "The Idempotency-Key must be a UUID.");
+            throw BusinessException.badRequest("INVALID_IDEMPOTENCY_KEY", "Idempotency-Key must be a UUID.");
         }
     }
 
@@ -97,15 +100,7 @@ public class IdempotencyService {
         try {
             return mapper.writeValueAsString(value);
         } catch (JsonProcessingException e) {
-            throw new IllegalStateException("response is not serialisable", e);
-        }
-    }
-
-    private JsonNode readTree(String body) {
-        try {
-            return mapper.readTree(body);
-        } catch (JsonProcessingException e) {
-            throw new IllegalStateException("stored response is not readable", e);
+            throw new IllegalStateException(e);
         }
     }
 
