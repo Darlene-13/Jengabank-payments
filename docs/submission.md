@@ -36,7 +36,7 @@ Final image record:
 | | |
 |---|---|
 | Tag | `v4` |
-| Digest | `sha256:<to be filled in from the v4 push output>` |
+| Digest | `sha256:1d6d1b8fb806dd3bd4225b44992bbc23ffb809afc106dd31aef20539927cd9da` |
 | Source | `main` at `587c974` (Merge pull request #14) |
 | Platform, user, size | `linux/amd64`, `10001:10001`, about 109 MB |
 
