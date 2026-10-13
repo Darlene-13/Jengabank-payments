@@ -5,15 +5,11 @@
 | Owner            | Security Lead                                                                                                                      |
 | Version          | 1.0                                                                                                                                |
 | Date             | 12 Oct 2026                                                                                                                        |
-| Status           | Baseline; results recorded per build in section 7                                                                                  |
-| Guiding document | Team Build Plan and API Guidelines                                                                                                 |
-| Format           | Control-objective structure (objective, criteria, evidence), with OWASP ASVS 4.0.3 and OWASP API Security Top 10 (2023) references |
-| Related          | `threat-model.md` `security-test-plan.md`, `log-actions.md`, `risk-register.md`                                                    |
-|                  |                                                                                                                                    |
+| Related          | `threat-model.md`, `security-test-plan.md`, `log-actions.md`, `risk-register.md`                                                    |
 
 ## 1. Purpose
 
-Each objective is a claim that a test can prove false. An objective is **met** only when every linked test passes on a build tagged Healthy. This document states what APP04 must guarantee, how each guarantee is measured, and where the evidence is kept. It is traceable to the threats in `threat-model.md`, the tests in `security-test-plan.md` and the events in `log-actions.md`.
+Each objective is a claim that tests can prove false. An objective is **met** only if all linked tests pass on a build tagged Healthy. Objectives trace to threats in `threat-model.md`, tests in `security-test-plan.md`, and events in `log-actions.md`. Evidence is kept per tag.
 
 ## 2. Principles
 
@@ -21,7 +17,7 @@ Each objective is a claim that a test can prove false. An objective is **met** o
 2. Authorization is enforced on the server for every protected operation.
 3. Every security-relevant decision is logged.
 4. Controls are tested on every Healthy release.
-5. Known weaknesses are recorded honestly as accepted risks.
+5. Known weaknesses are recorded honestly.
 
 ## 3. Priority levels
 
@@ -63,8 +59,8 @@ Evidence for every objective is stored under `evidence/<tag>/<test-id>/`. Test I
 | SO-15 | A user cannot approve their own pending transfer, and reversal is possible only for the MAKER role [confirm with Build Lead whether any user holds more than one role] | P0 | Self-approval returns 403 or 422; reversal by CUSTOMER, CHECKER or anonymous is refused | T18, T20 | MC-01, RV-05 | `approval.self_approval_denied`, `authz.access.denied` | V4, API5 |
 | SO-16 | An approval or rejection applies only to a transfer in PENDING_APPROVAL, and only once, even under parallel requests | P0 | One outcome and one posting for every invalid or parallel sequence | T21 | MC-02, MC-03 | `approval.approved`, `approval.rejected` | V11, API6 |
 | SO-17 | Repeated failed logins lock the account and the lockout expires; login responses for an unknown user and a wrong password are indistinguishable in content and timing | P1 | 423 after the threshold [threshold to be agreed]; identical 401 body and similar timing; lockout expires | T1, T2, T3 | AT-01, AT-02, AT-03 | `auth.login.failed`, `auth.account.locked` | V2, API2 |
-| SO-18 | After logout, the token can no longer be used | P1 | Old token rejected per the agreed logout policy (gap G4) | T5 | AT-05 | none today | V3, API2 |
-| SO-19 | Rate limits throttle login and transfer flooding with 429 | P1 | 429 under burst on login and transfers (owner assigned, gap G1) | T1, T28 | RL-01 | `rate.limited` | V13, API4 |
+| SO-18 | After logout, the token can no longer be used | P1 | Old token rejected (DB-backed session revocation on logout) | T5 | AT-05 | `auth.logout` | V3, API2 |
+| SO-19 | Rate limits throttle login and transfer flooding with 429 | P1 | 429 under burst on login (implemented); transfers/general API throttling defined per policy | T1, T28 | RL-01 | `rate.limited` | V13, API4 |
 | SO-37 | Staff visibility on transfers is limited to its defined scope; customers see only their own | P1 | Staff list and view all transfers; customers list and view own only | T10 | AZ-04 | `authz.access.denied` | V4, API5 |
 
 ### 4.3 Transaction controls

@@ -5,23 +5,20 @@
 | Owner            | Security Lead                                                                                                                                                                |
 | Version          | 1.0                                                                                                                                                                          |
 | Date             | 12 Oct 2026                                                                                                                                                                  |
-| Status           | Baseline; verify items marked [A] against the running build                                                                                                                  |
-| Guiding document | Team Build Plan and API Guidelines (endpoint contract, statuses, shared events)                                                                                              |
-| Method           | STRIDE per element on a data-flow diagram, attack trees, 5x5 likelihood and impact scoring (NIST SP 800-30, ISO/IEC 27005), OWASP API Security Top 10 (2023) cross-reference |
+| Method           | STRIDE; 5x5 likelihood/impact scoring (NIST SP 800-30, ISO/IEC 27005); OWASP API Security Top 10 (2023)                                                                      |
 | Related          | `security-objectives.md`, `security-test-plan.md`, `log-actions.md`, `risk-register.md`, `live-defence-runbook.md`                                                           |
-|                  |                                                                                                                                                                              |
 
 ## 1. Executive summary
 
 APP04 is a payments processing application that moves money between accounts using a double-entry ledger. Customers create transfers; fraud and limit rules decide whether a transfer completes, is blocked, or waits for a checker's approval; makers reverse completed transfers; checkers approve, reject and run reconciliation; every state change is written to structured logs and a hash-chained audit log.
 
-The highest risks are the ones that move money without authority or break ledger integrity: double spend and idempotency races (T11 to T13), IDOR and role escalation (T7, T8), reversal and approval abuse (T17, T20, T21), invalid amounts (T15), and audit tampering (T23). Rate limiting has no owner in the plan (T28, gap G1), which leaves login abuse unmitigated until it is assigned. Every threat below maps to a security objective in `security-objectives.md`, a test in `security-test-plan.md` and, where detection applies, a log event in `log-actions.md`.
+Key risks: double spend/idempotency races (T11–T13), IDOR/role escalation (T7, T8), reversal/approval abuse (T17, T20, T21), invalid amounts (T15), and audit tampering (T23). Threats map to objectives in `security-objectives.md`, tests in `security-test-plan.md`, and events in `log-actions.md`.
 
 ## 2. Scope
 
-**In scope:** REST API (`/api/v1`), health and OpenAPI endpoints, Angular PWA, database, authentication and token handling, ledger, transfers, idempotency, reversals, limits, fraud, approvals, audit chain, reconciliation job, logging, Docker image and CI.
+**In scope:** REST API (`/api/v1`), health/OpenAPI endpoints, React SPA/PWA, database, authentication/token handling, ledger, transfers, idempotency, reversals, limits, fraud, approvals, audit chain, reconciliation, logging, Docker image, CI.
 
-**Out of scope:** host operating system, network provider and network-layer DDoS, physical security, third-party payment rails (none in the contract).
+**Out of scope:** host OS, network provider/network-layer DDoS, physical security, third-party payment rails.
 
 ## 3. Assumptions
 
@@ -29,7 +26,7 @@ Each assumption is verified against the running build and recorded as passed or 
 
 | ID  | Assumption                                                                                                         |
 | --- | ------------------------------------------------------------------------------------------------------------------ |
-| AS1 | Bearer tokens are stateless signed tokens (likely JWT) issued at login [A]                                         |
+| AS1 | Session tokens are DB-backed (stateful) UUIDs stored in the sessions table with revocation (revoked_at) and expiry [A] |
 | AS2 | TLS terminates in front of the app in production; the local demo may use HTTP [A]                                  |
 | AS3 | Database credentials and the signing key come from environment or secret store, not the image [A]                  |
 | AS4 | One or more app instances serve concurrent requests; the database provides row locks or serializable isolation [A] |
@@ -40,7 +37,7 @@ Each assumption is verified against the running build and recorded as passed or 
 
 ### 4.1 Components
 
-Angular PWA (browser); REST API with auth filter, controllers and `TransferService`; limits, fraud and approval modules; double-entry ledger; idempotency store; audit log with hash chain; reconciliation job; relational database; structured JSON logs; CI pipeline and container runtime.
+React SPA/PWA (browser); REST API (auth filter, controllers, services); limits/fraud/approval modules; double-entry ledger; idempotency store; hash-chained audit log; reconciliation job; relational database; structured JSON logs; CI pipeline; container runtime.
 
 ### 4.2 Data-flow diagram
 
@@ -143,8 +140,8 @@ Columns: STRIDE category, actor, likelihood / impact, inherent score, required m
 | T2 | Information disclosure | Username enumeration through differing errors or timing | TA1 | H / M | 15 High | Identical response and timing for unknown user and wrong password [A] | `auth.login.failed` | AT-02 | SO-17 | Low |
 | T3 | Denial of service | Lockout used to deny service to a victim | TA1, TA2 | M / M | 9 Medium | Time-boxed lockout; per-account and per-IP limits | `auth.account.locked` | AT-03 | SO-17 | Medium |
 | T4 | Spoofing, Tampering | Forged or tampered token, `alg: none`, role claim edit | TA1, TA2 | M / H | 15 High | Pin signing algorithm, strong secret, enforce `exp`, validate signature, role from server-side data | `auth.token.invalid` | AT-04 | SO-11 | Low |
-| T5 | Spoofing | Stolen token reused after logout | TA1, TA3 | M / H | 15 High | Short expiry plus denylist or server-side session on logout [G4]; tokens assumed stateless [A] | `auth.token.invalid` | AT-05 | SO-18 | Medium |
-| T6 | Information disclosure | Token or credentials leaked in URLs, logs or error bodies | TA1, TA7 | M / H | 15 High | Header-only tokens, log redaction | none today | LG-02 | SO-21 | Low |
+| T5 | Spoofing | Stolen token reused after logout | TA1, TA3 | M / H | 15 High | Short expiry plus server-side session revocation (sessions.revoke_at) on logout [G4]; DB-backed stateful sessions [A] | `auth.token.invalid`, `auth.logout` | AT-05 | SO-18 | Medium |
+| T6 | Information disclosure | Token or credentials leaked in URLs, logs or error bodies | TA1, TA7 | M / H | 15 High | Header-only tokens, log redaction | — | LG-02 | SO-21 | Low |
 
 ### 8.2 Authorization
 
@@ -197,7 +194,7 @@ Columns: STRIDE category, actor, likelihood / impact, inherent score, required m
 |---|---|---|---|---|---|---|---|---|---|---|
 | T26 | Tampering | SQL injection through path, query, body or header fields | TA1, TA2 | M / H | 15 High | Parameterised queries only; least-privilege DB role | `request.invalid` | IN-01 | SO-25 | Low |
 | T27 | Denial of service, Tampering | Oversized or malformed bodies; unknown fields (mass assignment) | TA1, TA2 | H / M | 15 High | 16 KB cap; reject unknown fields; Bean Validation; DTOs separate from entities | `request.invalid` | IN-02, IN-03, IN-04 | SO-26 | Low |
-| T28 | Denial of service | Request flooding on transfers or login | TA1 | H / M | 15 High | Rate limiting; currently unowned [G1] | `rate.limited` | RL-01 | SO-19 | Medium |
+| T28 | Denial of service | Request flooding on transfers or login | TA1 | H / M | 15 High | Login rate limiting implemented (per IP, per minute); general API rate limiting [G1] | `rate.limited` | RL-01 | SO-19 | Medium |
 | T29 | Information disclosure | Verbose errors expose stack traces, SQL or framework banners | TA1 | M / M | 9 Medium | Uniform error body: `code`, `message`, `requestId` | `request.invalid` | IL-01 | SO-27 | Low |
 | T30 | Information disclosure | Exposed debug or actuator endpoints, or an over-detailed `/openapi.json` | TA1 | M / M | 9 Medium | Disable or restrict; review spec content | none | IL-02 | SO-28 | Low |
 | T31 | Tampering | XSS in Angular through free-text fields or unsafe bindings | TA2 | M / H | 15 High | No `innerHTML`, no sanitiser bypass; CSP | none | FE-01 | SO-30 | Low |

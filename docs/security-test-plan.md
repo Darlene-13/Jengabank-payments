@@ -5,29 +5,25 @@
 | Owner            | Security Lead                                                                                                                                                                        |
 | Version          | 1.2                                                                                                                                                                                  |
 | Date             | 12 Oct 2026                                                                                                                                                                          |
-| Status           | Ready for Healthy-release testing                                                                                                                                                    |
-| Guiding document | Team Build Plan and API Guidelines (endpoint contract, statuses, shared events)                                                                                                      |
-| Methods          | NIST SP 800-115 planning, ISACA-style workpaper columns, OWASP API Security Top 10 (2023), OWASP ASVS 4.0.3                                                                          |
-| Related          | `threat-model.md`, security-objectives.md`, `log-actions.md`, `event-logging-verification-matrix.md`, ` `frontend-security-review.md`, `risk-register.md`, `live-defence-runbook.md` |
+| Related          | `threat-model.md`, `security-objectives.md`, `log-actions.md`, `event-logging-verification-matrix.md`, `frontend-security-review.md`, `risk-register.md`, `live-defence-runbook.md` |
 
 ## 1. Purpose and rules
 
-Each test pairs an attack with its expected **response** and expected **detection** (log event from `log-actions.md`). Test IDs, threat IDs (T1 to T44) and objective IDs (SO-01 to SO-44) are those used in `threat-model.md` and `security-objectives.md`.
+Each test pairs an attack with expected **response** and **detection** (log event from `log-actions.md`). Test IDs map to threats (T1–T44) and objectives (SO-01–SO-44).
 
-- Test only local or team-provided environments, only against a tagged Healthy image, never `latest`.
-- Destructive tests (audit tampering, injected imbalance) run on a **copy of the database only**.
-- After every test, record the response, the log line and the ledger effect, then run the invariant SQL (Appendix A).
-- Evidence path: `evidence/<tag>/<test-id>/` containing request, response and log line.
-- Result codes: **P** pass, **F** fail, **B** blocked or not testable, **N/A**.
-- Failures become entries in the findings register (section 5).
+- Test only local/team environments against a tagged Healthy image (never `latest`).
+- Destructive tests (audit tampering, injected imbalance) run on a database copy only.
+- After each test, record response, log line, ledger effect, and run invariant SQL (Appendix A).
+- Evidence: `evidence/<tag>/<test-id>/`.
+- Result codes: **P** pass, **F** fail, **B** blocked/not testable, **N/A**.
 
 | Field | Value |
 |---|---|
 | Tester | |
 | Target tag | |
-| Date / time (UTC) | |
+| Date/time (UTC) | |
 | Base URL | |
-| Test accounts | customerA, customerB, maker1, checker1, checker2 (credentials in a password manager, never in the repo) |
+| Test accounts | customerA, customerB, maker1, checker1, checker2 |
 
 ## 2. Test cases
 
@@ -41,7 +37,7 @@ Columns: **SO** objective, **T** threat, **Event** expected from `log-actions.md
 | AT-02 | Login with wrong password versus unknown user. Compare status, body and timing over a sample | Identical 401 body; negligible timing difference | `auth.login.failed` | SO-17 | T2 | | |
 | AT-03 | Lock a victim account deliberately; wait for expiry. Check per-account and per-IP limits | Lockout is time-boxed and expires; behaviour documented | `auth.account.locked` | SO-17 | T3 | | |
 | AT-04 | Token validation. Variants: expired, tampered payload, tampered signature, `alg: none`, role claim edited to CHECKER, missing, malformed or duplicate Authorization header, token in query string | 401 every time; query-string token rejected | `auth.token.invalid` | SO-11 | T4 | | |
-| AT-05 | Reuse token after logout. Variants: role change or user removal then reuse old token | Token unusable per agreed logout policy (gap G4) | none today (`auth.logout` proposed) | SO-18 | T5 | | |
+| AT-05 | Reuse token after logout. Variants: role change or user removal then reuse old token | Token unusable after logout (DB-backed session revocation) | `auth.logout` | SO-18 | T5 | | |
 
 ### 2.2 AZ: Authorization
 
