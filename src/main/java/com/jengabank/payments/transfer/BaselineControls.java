@@ -62,6 +62,7 @@ final class BaselineControls {
         private static final long NEW_PAYEE_REVIEW_MINOR = 10_000_000L;  // KES 100,000
         private static final long NIGHT_REVIEW_MINOR = 5_000_000L;       // KES 50,000
         private static final int BLOCKED_ATTEMPTS_LIMIT = 3;
+        private static final int ROUND_TRIP_LOOKBACK_MINUTES = 60;
         private final JdbcTemplate jdbc;
 
         Fraud(JdbcTemplate jdbc) {
@@ -87,6 +88,18 @@ final class BaselineControls {
                     Boolean.class, c.customerId(), c.toAccountId());
             if (!Boolean.TRUE.equals(paidBefore) && c.amountMinor() >= NEW_PAYEE_REVIEW_MINOR) {
                 review.add("Large amount to an account you haven't paid before");
+            }
+
+            // Round trip (layering): the recipient's account paid this customer within the last hour.
+            // Held for review, not blocked: refunds and corrections are legitimate, so a checker decides.
+            Boolean roundTrip = jdbc.queryForObject("""
+                    SELECT EXISTS (SELECT 1 FROM transfers t JOIN accounts a ON a.id = t.to_account_id
+                                    WHERE t.from_account_id = ? AND a.owner_id = ?
+                                      AND t.status IN ('COMPLETED', 'PENDING_APPROVAL')
+                                      AND t.created_at > now() - make_interval(mins => ?))""",
+                    Boolean.class, c.toAccountId(), c.customerId(), ROUND_TRIP_LOOKBACK_MINUTES);
+            if (Boolean.TRUE.equals(roundTrip)) {
+                review.add("This account sent you money in the last hour; sending it straight back needs a second check");
             }
 
             int hour = ZonedDateTime.now(ZoneId.of("Africa/Nairobi")).getHour();
