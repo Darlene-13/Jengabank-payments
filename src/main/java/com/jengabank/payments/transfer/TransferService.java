@@ -30,6 +30,7 @@ import com.jengabank.payments.ledger.LedgerService;
 import com.jengabank.payments.ledger.LedgerService.Direction;
 import com.jengabank.payments.ledger.LedgerService.Line;
 import com.jengabank.payments.logging.Actions;
+import com.jengabank.payments.logging.RateLimiter;
 import com.jengabank.payments.logging.RequestLogFilter;
 import com.jengabank.payments.logging.SecurityEventLogger;
 import com.jengabank.payments.transfer.FraudEngine.Context;
@@ -54,6 +55,10 @@ public class TransferService {
     private static final Set<String> STATUSES =
             Set.of("COMPLETED", "PENDING_APPROVAL", "REJECTED", "BLOCKED", "REVERSED");
 
+    /** Anti-enumeration: unknown destination numbers allowed per user per window (600s is the limiter's max). */
+    private static final int BAD_DESTINATIONS_MAX = 5;
+    private static final int BAD_DESTINATIONS_WINDOW_SECONDS = 600;
+
     private final TransferRepository repo;
     private final LedgerService ledger;
     private final IdempotencyService idempotency;
@@ -61,10 +66,11 @@ public class TransferService {
     private final SecurityEventLogger events;
     private final LimitChecker limits;
     private final FraudEngine fraud;
+    private final RateLimiter rateLimiter;
     private final long thresholdMinor;
 
     public TransferService(TransferRepository repo, LedgerService ledger, IdempotencyService idempotency,
-                           AuditWriter audit, SecurityEventLogger events, JdbcTemplate jdbc,
+                           AuditWriter audit, SecurityEventLogger events, JdbcTemplate jdbc, RateLimiter rateLimiter,
                            ObjectProvider<LimitChecker> limitChecker, ObjectProvider<FraudEngine> fraudEngine,
                            @Value("${jengabank.approval.threshold-minor:25000000}") long thresholdMinor,
                            @Value("${jengabank.limits.max-per-transfer-minor:100000000}") long maxPerTransfer,
@@ -76,6 +82,7 @@ public class TransferService {
         this.idempotency = idempotency;
         this.audit = audit;
         this.events = events;
+        this.rateLimiter = rateLimiter;
         this.thresholdMinor = thresholdMinor;
         this.limits = limitChecker.getIfAvailable(
                 () -> new BaselineControls.Limits(jdbc, maxPerTransfer, dailyTotal, velocityMax, velocityWindow));
@@ -103,9 +110,18 @@ public class TransferService {
         if (!"ACTIVE".equals(from.status())) {
             throw refuse(me, req, "ACCOUNT_NOT_ACTIVE", "This account can't send money right now.", "account_not_active");
         }
-        AccountRef to = repo.findActiveCustomerAccount(req.toAccountNumber()).orElseThrow(() ->
-                refuse(me, req, "INVALID_DESTINATION", "Check the account number. We can't send money to it.",
-                        "invalid_destination"));
+        AccountRef to = repo.findActiveCustomerAccount(req.toAccountNumber()).orElse(null);
+        if (to == null) {
+            // Counted in its own transaction, so the count survives this request's rollback.
+            if (!rateLimiter.allow("transfer.bad_destination:" + me.id(), BAD_DESTINATIONS_MAX,
+                    BAD_DESTINATIONS_WINDOW_SECONDS)) {
+                events.warn(Actions.RATE_LIMITED, "username", me.username(), "endpoint", "transfers.destination_lookup");
+                throw new BusinessException(HttpStatus.TOO_MANY_REQUESTS, "RATE_LIMITED",
+                        "Too many attempts with unknown account numbers. Wait 10 minutes and try again.");
+            }
+            throw refuse(me, req, "INVALID_DESTINATION", "Check the account number. We can't send money to it.",
+                    "invalid_destination");
+        }
         if (to.id().equals(from.id())) {
             throw refuse(me, req, "SAME_ACCOUNT", "You can't send money to the same account.", "same_account");
         }

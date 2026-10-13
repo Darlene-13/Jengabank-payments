@@ -27,6 +27,7 @@ services:
       DB_URL: jdbc:postgresql://db:5432/jengabank_payments
       DB_USER: jengabank
       DB_PASSWORD: ${LOCAL_DB_PASSWORD:-local-dev-only}
+      SWAGGER_UI_ENABLED: "true"            # local only; the image keeps it off
     ports:
       - "127.0.0.1:8080:8080"
     read_only: true

@@ -25,9 +25,13 @@ import com.jengabank.payments.logging.RateLimiter;
 import com.jengabank.payments.logging.SecurityEventLogger;
 import com.jengabank.payments.reversal.ReversalDtos.RejectRequest;
 import com.jengabank.payments.reversal.ReversalDtos.ReversalDto;
+
 import com.jengabank.payments.reversal.ReversalDtos.ReversalRequest;
 
+import io.swagger.v3.oas.annotations.tags.Tag;
+
 /** Roles are enforced twice: by URL in SecurityConfig and by @PreAuthorize here. */
+@Tag(name = "Reversals")
 @RestController
 public class ReversalController {
 

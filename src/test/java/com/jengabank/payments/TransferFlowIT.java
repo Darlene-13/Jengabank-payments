@@ -149,6 +149,23 @@ class TransferFlowIT extends AbstractApiIT {
     }
 
     @Test
+    void guessingAccountNumbersIsRateLimited() throws Exception {
+        Customer alice = newCustomer(1_000_000);
+        Customer bob = newCustomer(0);
+        for (int i = 0; i < 5; i++) {
+            transfer(alice, "99999999990" + i, 1_000, UUID.randomUUID().toString())
+                    .andExpect(status().isUnprocessableEntity())
+                    .andExpect(jsonPath("$.code").value("INVALID_DESTINATION"));
+        }
+        transfer(alice, "999999999909", 1_000, UUID.randomUUID().toString())
+                .andExpect(status().isTooManyRequests())
+                .andExpect(jsonPath("$.code").value("RATE_LIMITED"));
+
+        // Only wrong numbers are limited: paying a real account still works.
+        transfer(alice, bob, 1_000).andExpect(status().isCreated());
+    }
+
+    @Test
     void fractionalOrNegativeAmountsAreRejected() throws Exception {
         Customer alice = newCustomer(1_000_000);
         Customer bob = newCustomer(0);

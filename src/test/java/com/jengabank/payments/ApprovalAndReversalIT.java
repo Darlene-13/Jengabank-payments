@@ -108,8 +108,8 @@ class ApprovalAndReversalIT extends AbstractApiIT {
         assertThat(balance(bob.accountId())).isZero();
 
         postJson("/api/v1/transfers/" + transferId + "/reversals", maker, "{\"reason\":\"Trying a second time\"}")
-                .andExpect(status().isUnprocessableEntity())
-                .andExpect(jsonPath("$.code").value("REVERSAL_NOT_ALLOWED"));
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value("REVERSAL_EXISTS"));
     }
 
     @Test

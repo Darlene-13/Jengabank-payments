@@ -34,7 +34,7 @@ curl -s localhost:8080/healthz          # {"status":"UP"}
 curl -s localhost:8080/readyz           # {"status":"READY"} once Flyway has migrated
 ```
 
-Seeded users (passwords are in `SETUP.md`):
+Seeded users (passwords are shared in the team chat, never in the repo):
 
 | Username       | Role     | Use it to                                      |
 |----------------|----------|------------------------------------------------|
@@ -155,6 +155,7 @@ See the [full catalogue](#11-error-code-catalogue).
 | `GET /approvals`, per user         | 30 per minute          | `429 RATE_LIMITED` |
 | `GET /accounts/{id}/entries`, per user | 30 per minute      | `429 RATE_LIMITED` |
 | Transfer velocity, per customer    | 5 per 60 seconds       | `422 TRANSFER_BLOCKED` (recorded) |
+| Unknown destination account numbers, per customer | 5 per 10 minutes | `429 RATE_LIMITED` (anti-enumeration; each miss is audited) |
 | Request body size                  | 16 KB                  | `413 PAYLOAD_TOO_LARGE` |
 
 The rate limiters are **backed by the database** with an atomic upsert, so limits hold across several app instances and restarts. Every limit hit is logged as `rate.limited`.
@@ -357,6 +358,7 @@ flowchart TD
 | `202 Accepted` | `PENDING_APPROVAL`. A checker must approve. No money has moved. |
 | `422`          | `TRANSFER_BLOCKED` (limit or fraud, with `reasons`), `INSUFFICIENT_FUNDS`, `INVALID_DESTINATION`, `SAME_ACCOUNT` or `ACCOUNT_NOT_ACTIVE` |
 | `404`          | The source account isn't yours, or doesn't exist |
+| `429`          | `RATE_LIMITED`: more than 5 unknown destination account numbers in 10 minutes |
 | `409`          | `IDEMPOTENCY_CONFLICT` |
 
 **Transfer object**
@@ -485,8 +487,8 @@ A reversal **never edits or deletes** the original transfer. It posts a **new jo
 | 201    | n/a                           | Posted (under the threshold) |
 | 202    | n/a                           | Waiting for a checker |
 | 404    | `NOT_FOUND`                   | No such transfer |
-| 409    | `REVERSAL_EXISTS`             | A pending or posted reversal already exists for this transfer |
-| 422    | `REVERSAL_NOT_ALLOWED`        | The transfer isn't `COMPLETED` (for example, already `REVERSED`, `PENDING_APPROVAL` or `BLOCKED`) |
+| 409    | `REVERSAL_EXISTS`             | The transfer is already reversed, or a reversal is waiting for approval |
+| 422    | `REVERSAL_NOT_ALLOWED`        | The transfer isn't `COMPLETED` (for example `PENDING_APPROVAL`, `REJECTED` or `BLOCKED`) |
 | 422    | `REVERSAL_INSUFFICIENT_FUNDS` | The receiver no longer holds enough to give back |
 
 **Reversal object**
@@ -677,7 +679,7 @@ These are the guarantees we claim, and how each one is enforced.
 | 422 | `REVERSAL_NOT_ALLOWED` | Only `COMPLETED` transfers can be reversed |
 | 422 | `REVERSAL_INSUFFICIENT_FUNDS` | The receiver can't give the money back |
 | 422 | `RULE_VIOLATION` | A database guard rejected the change (the backstop fired) |
-| 429 | `RATE_LIMITED` | Slow down |
+| 429 | `RATE_LIMITED` | Slow down: login, list endpoints, or too many unknown destination account numbers |
 | 500 | `INTERNAL_ERROR` | Unexpected. Quote the `requestId`. |
 
 ---
