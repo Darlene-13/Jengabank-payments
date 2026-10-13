@@ -84,6 +84,12 @@ logging:
 
 # Business limits (server-side, never trusted from the client). Amounts in cents.
 jengabank:
+  security:
+    # Comma-separated IPs/IPv4 CIDRs of our OWN reverse proxy/ingress, if any (e.g. "10.0.0.1" or
+    # "10.0.0.0/8"). X-Forwarded-For/X-Real-IP are only read when the TCP peer is one of these;
+    # anyone else's forwarded headers are ignored and request.getRemoteAddr() is used instead.
+    # Empty (default) = never trust them, since there's nothing in front of the container locally.
+    trusted-proxies: ${TRUSTED_PROXIES:}
   limits:
     max-per-transfer-minor: 100000000        # KES 1,000,000
     daily-total-minor: 200000000             # KES 2,000,000 per customer per day
