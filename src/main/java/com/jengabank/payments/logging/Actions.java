@@ -73,4 +73,7 @@ public final class Actions {
     // request / rate
     public static final String REQUEST_INVALID = "request.invalid";
     public static final String RATE_LIMITED    = "rate.limited";
+
+    // NEW — emitted by GlobalExceptionHandler when a DB guard rejects an operation.
+    public static final String DB_GUARD_TRIGGERED = "db.guard_triggered";
 }

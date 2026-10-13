@@ -20,6 +20,9 @@ public class AppProperties {
     private long weeklyLimitMinor = 1_000_000_000L;
     private double structuringRatio = 0.95;
 
+    /** NEW — team plan: no more than 5 transfers per minute per user. */
+    private long minuteTransferLimit = 5L;
+
     private int oddHourStart = 23;
     private int oddHourEnd = 5;
     private long largeAmountNewPayeeMinor = 10_000_000L;
@@ -81,6 +84,14 @@ public class AppProperties {
 
     public void setStructuringRatio(double structuringRatio) {
         this.structuringRatio = structuringRatio;
+    }
+
+    public long getMinuteTransferLimit() {
+        return minuteTransferLimit;
+    }
+
+    public void setMinuteTransferLimit(long minuteTransferLimit) {
+        this.minuteTransferLimit = minuteTransferLimit;
     }
 
     public int getOddHourStart() {
