@@ -37,6 +37,12 @@ public class RequestLogFilter extends OncePerRequestFilter {
     // Only accept safe client IDs, so nobody can inject junk into our logs.
     private static final Pattern SAFE_ID = Pattern.compile("^[A-Za-z0-9-]{8,64}$");
 
+    private final ClientIpResolver clientIp;
+
+    public RequestLogFilter(ClientIpResolver clientIp) {
+        this.clientIp = clientIp;
+    }
+
     @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain)
             throws ServletException, IOException {
@@ -55,7 +61,7 @@ public class RequestLogFilter extends OncePerRequestFilter {
         } finally {
             Object user = request.getAttribute(USER_ATTRIBUTE);
             log.info("request",
-                    kv("src_ip", request.getRemoteAddr()),
+                    kv("src_ip", clientIp.resolve(request)),
                     kv("method", request.getMethod()),
                     kv("path", request.getRequestURI()),
                     kv("status", response.getStatus()),

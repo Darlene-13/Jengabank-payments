@@ -13,6 +13,7 @@ import org.springframework.web.bind.annotation.RestController;
 import com.jengabank.payments.auth.AuthDtos.LoginRequest;
 import com.jengabank.payments.auth.AuthDtos.LoginResponse;
 import com.jengabank.payments.auth.AuthDtos.MeResponse;
+import com.jengabank.payments.logging.ClientIpResolver;
 import com.jengabank.payments.logging.RequestLogFilter;
 
 @RestController
@@ -20,14 +21,16 @@ import com.jengabank.payments.logging.RequestLogFilter;
 public class AuthController {
 
     private final AuthService auth;
+    private final ClientIpResolver clientIp;
 
-    public AuthController(AuthService auth) {
+    public AuthController(AuthService auth, ClientIpResolver clientIp) {
         this.auth = auth;
+        this.clientIp = clientIp;
     }
 
     @PostMapping("/auth/login")
     public LoginResponse login(@Valid @RequestBody LoginRequest body, HttpServletRequest request) {
-        LoginResponse response = auth.login(body.username(), body.password(), request.getRemoteAddr());
+        LoginResponse response = auth.login(body.username(), body.password(), clientIp.resolve(request));
         request.setAttribute(RequestLogFilter.USER_ATTRIBUTE, response.user().username());
         return response;
     }
