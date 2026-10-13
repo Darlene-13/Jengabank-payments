@@ -29,18 +29,29 @@ import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 import com.jengabank.payments.logging.Actions;
 import com.jengabank.payments.logging.RequestLogFilter;
+import com.jengabank.payments.logging.SecurityEventLogger;
 
 /**
  * Turns every exception into { code, message, requestId }.
  * Never returns stack traces, SQL, class names or database messages.
+ * Rejections go through SecurityEventLogger, so the request's http line carries the event too.
  */
 @RestControllerAdvice
 public class GlobalExceptionHandler {
 
     private static final Logger log = LoggerFactory.getLogger("security");
 
+    private final SecurityEventLogger events;
+
+    public GlobalExceptionHandler(SecurityEventLogger events) {
+        this.events = events;
+    }
+
     @ExceptionHandler(BusinessException.class)
     public ResponseEntity<ApiError> business(BusinessException ex) {
+        if (ex.status() == HttpStatus.BAD_REQUEST) {
+            events.warn(Actions.REQUEST_INVALID, "code", ex.code());
+        }
         return body(ex.status(), ex.code(), ex.getMessage(), ex.reasons());
     }
 
@@ -49,48 +60,53 @@ public class GlobalExceptionHandler {
         List<String> reasons = ex.getBindingResult().getFieldErrors().stream()
                 .map(f -> f.getField() + ": " + f.getDefaultMessage())
                 .toList();
-        log.warn("invalid request", kv("action", Actions.REQUEST_INVALID), kv("reasons", reasons));
+        boolean badAmount = ex.getBindingResult().getFieldErrors().stream()
+                .anyMatch(f -> "amountMinor".equals(f.getField()));
+        events.warn(badAmount ? Actions.TRANSFER_INVALID_AMOUNT : Actions.REQUEST_INVALID, "reasons", reasons);
         return body(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED", "Some fields are invalid.", reasons);
     }
 
     @ExceptionHandler({HandlerMethodValidationException.class, ConstraintViolationException.class,
             MethodArgumentTypeMismatchException.class, MissingServletRequestParameterException.class})
     public ResponseEntity<ApiError> invalidParams(Exception ex) {
-        log.warn("invalid request", kv("action", Actions.REQUEST_INVALID), kv("type", ex.getClass().getSimpleName()));
+        events.warn(Actions.REQUEST_INVALID, "type", ex.getClass().getSimpleName());
         return body(HttpStatus.BAD_REQUEST, "INVALID_PARAMETER", "Some details in the request aren't valid.");
     }
 
     @ExceptionHandler(HttpMessageNotReadableException.class)
     public ResponseEntity<ApiError> unreadable(HttpMessageNotReadableException ex) {
-        log.warn("unreadable body", kv("action", Actions.REQUEST_INVALID));
+        events.warn(Actions.REQUEST_INVALID, "reason", "unreadable_body");
         return body(HttpStatus.BAD_REQUEST, "MALFORMED_REQUEST",
                 "The request body isn't valid JSON, or has fields we don't accept.");
     }
 
     @ExceptionHandler(MissingRequestHeaderException.class)
     public ResponseEntity<ApiError> missingHeader(MissingRequestHeaderException ex) {
-        log.warn("missing header", kv("action", Actions.REQUEST_INVALID), kv("header", ex.getHeaderName()));
+        events.warn(Actions.REQUEST_INVALID, "reason", "missing_header", "header", ex.getHeaderName());
         return body(HttpStatus.BAD_REQUEST, "MISSING_HEADER", "Missing required header: " + ex.getHeaderName());
     }
 
     @ExceptionHandler(NoResourceFoundException.class)
     public ResponseEntity<ApiError> noResource(NoResourceFoundException ex) {
+        events.warn(Actions.REQUEST_INVALID, "reason", "unknown_route");
         return body(HttpStatus.NOT_FOUND, "NOT_FOUND", "We couldn't find that.");
     }
 
     @ExceptionHandler(HttpRequestMethodNotSupportedException.class)
     public ResponseEntity<ApiError> method(HttpRequestMethodNotSupportedException ex) {
+        events.warn(Actions.REQUEST_INVALID, "reason", "method_not_allowed");
         return body(HttpStatus.METHOD_NOT_ALLOWED, "METHOD_NOT_ALLOWED", "That method isn't allowed here.");
     }
 
     @ExceptionHandler(HttpMediaTypeNotSupportedException.class)
     public ResponseEntity<ApiError> mediaType(HttpMediaTypeNotSupportedException ex) {
+        events.warn(Actions.REQUEST_INVALID, "reason", "unsupported_media_type");
         return body(HttpStatus.UNSUPPORTED_MEDIA_TYPE, "UNSUPPORTED_MEDIA_TYPE", "Send the request as application/json.");
     }
 
     @ExceptionHandler(AccessDeniedException.class)
     public ResponseEntity<ApiError> denied(AccessDeniedException ex) {
-        log.warn("access denied", kv("action", Actions.AUTHZ_ACCESS_DENIED));
+        events.warn(Actions.AUTHZ_ACCESS_DENIED, "reason", "role");
         return body(HttpStatus.FORBIDDEN, "FORBIDDEN", "Your role can't do this.");
     }
 
@@ -103,7 +119,7 @@ public class GlobalExceptionHandler {
         }
         switch (state) {
             case "23514": // check_violation: unbalanced journal, overdraft, illegal status change, self-approval
-                log.warn("database rule blocked request", kv("action", Actions.DB_GUARD_TRIGGERED), kv("sqlstate", state));
+                events.warn(Actions.DB_GUARD_TRIGGERED, "sqlstate", state);
                 return body(HttpStatus.UNPROCESSABLE_ENTITY, "RULE_VIOLATION", "This was stopped by a bank rule.");
             case "23505": // unique_violation: duplicate reversal, duplicate idempotency key
                 return body(HttpStatus.CONFLICT, "CONFLICT", "This conflicts with an earlier request.");
@@ -112,7 +128,7 @@ public class GlobalExceptionHandler {
             case "40001", "40P01": // serialization failure, deadlock
                 return body(HttpStatus.CONFLICT, "CONCURRENT_UPDATE", "Another request changed this at the same time. Try again.");
             case "42501": // our append-only / immutability triggers: someone tried to rewrite history
-                log.error("attempt to modify protected data", kv("action", Actions.DB_GUARD_TRIGGERED), kv("sqlstate", state));
+                events.error(Actions.DB_GUARD_TRIGGERED, "sqlstate", state, "reason", "protected_data");
                 return body(HttpStatus.INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", "The server hit a problem. Try again in a moment.");
             default:
                 return serverError(ex);

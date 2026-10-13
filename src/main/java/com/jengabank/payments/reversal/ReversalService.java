@@ -72,6 +72,10 @@ public class ReversalService {
             return BusinessException.notFound();
         });
 
+        if ("REVERSED".equals(transfer.status())) {
+            events.warn(Actions.REVERSAL_DUPLICATE_DENIED, "username", maker.username(), "transfer_id", transferId);
+            throw BusinessException.conflict("REVERSAL_EXISTS", "This transfer has already been reversed.");
+        }
         if (!"COMPLETED".equals(transfer.status())) {
             events.warn(Actions.REVERSAL_DENIED, "username", maker.username(), "transfer_id", transferId,
                     "reason", "status_" + transfer.status());

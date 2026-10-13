@@ -14,7 +14,7 @@ export default defineConfig({
         // App shell only. Balances and transfers are never cached.
         globPatterns: ["**/*.{js,css,html,woff,woff2,png,svg}"],
         navigateFallback: "/index.html",
-        navigateFallbackDenylist: [/^\/api\//, /^\/healthz/, /^\/readyz/, /^\/openapi\.json/],
+        navigateFallbackDenylist: [/^\/api\//, /^\/healthz/, /^\/readyz/, /^\/openapi\.json/, /^\/swagger-ui/],
         runtimeCaching: [],
         cleanupOutdatedCaches: true,
       },

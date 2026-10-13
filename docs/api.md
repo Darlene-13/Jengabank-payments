@@ -487,8 +487,8 @@ A reversal **never edits or deletes** the original transfer. It posts a **new jo
 | 201    | n/a                           | Posted (under the threshold) |
 | 202    | n/a                           | Waiting for a checker |
 | 404    | `NOT_FOUND`                   | No such transfer |
-| 409    | `REVERSAL_EXISTS`             | A pending or posted reversal already exists for this transfer |
-| 422    | `REVERSAL_NOT_ALLOWED`        | The transfer isn't `COMPLETED` (for example, already `REVERSED`, `PENDING_APPROVAL` or `BLOCKED`) |
+| 409    | `REVERSAL_EXISTS`             | The transfer is already reversed, or a reversal is waiting for approval |
+| 422    | `REVERSAL_NOT_ALLOWED`        | The transfer isn't `COMPLETED` (for example `PENDING_APPROVAL`, `REJECTED` or `BLOCKED`) |
 | 422    | `REVERSAL_INSUFFICIENT_FUNDS` | The receiver no longer holds enough to give back |
 
 **Reversal object**
