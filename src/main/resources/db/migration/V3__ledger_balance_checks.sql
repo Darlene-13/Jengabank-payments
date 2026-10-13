@@ -4,20 +4,20 @@
 --     transfer may legally be journaled across several statements inside one tx.
 CREATE OR REPLACE FUNCTION ledger_transfer_balance_check() RETURNS trigger AS $$
 DECLARE
-    bad BIGINT;
+bad BIGINT;
 BEGIN
-    SELECT COUNT(*) INTO bad FROM (
-        SELECT transfer_id
-        FROM ledger_entries
-        WHERE transfer_id IS NOT NULL
-        GROUP BY transfer_id
-        HAVING COALESCE(SUM(amount_minor), 0) <> 0
-    ) unbalanced;
+SELECT COUNT(*) INTO bad FROM (
+                                  SELECT transfer_id
+                                  FROM ledger_entries
+                                  WHERE transfer_id IS NOT NULL
+                                  GROUP BY transfer_id
+                                  HAVING COALESCE(SUM(amount_minor), 0) <> 0
+                              ) unbalanced;
 
-    IF bad > 0 THEN
+IF bad > 0 THEN
         RAISE EXCEPTION 'ledger imbalance: % transfer(s) with non-zero net entries', bad;
-    END IF;
-    RETURN NULL;
+END IF;
+RETURN NULL;
 END;
 $$ LANGUAGE plpgsql;
 
@@ -30,16 +30,16 @@ CREATE CONSTRAINT TRIGGER ledger_transfer_balance_trigger
 --     invariant holds no matter what the Java code does.
 CREATE OR REPLACE FUNCTION customer_balance_nonnegative_check() RETURNS trigger AS $$
 DECLARE
-    bad BIGINT;
+bad BIGINT;
 BEGIN
-    SELECT COUNT(*) INTO bad
-    FROM account_balances
-    WHERE kind = 'CUSTOMER' AND balance_minor < 0;
+SELECT COUNT(*) INTO bad
+FROM account_balances
+WHERE kind = 'CUSTOMER' AND balance_minor < 0;
 
-    IF bad > 0 THEN
+IF bad > 0 THEN
         RAISE EXCEPTION 'overdrawn customer account(s) detected';
-    END IF;
-    RETURN NULL;
+END IF;
+RETURN NULL;
 END;
 $$ LANGUAGE plpgsql;
 
@@ -54,7 +54,7 @@ CREATE CONSTRAINT TRIGGER customer_balance_nonnegative_trigger
 --     the chain and any historical edit invalidates every later hash.
 CREATE OR REPLACE FUNCTION audit_chain() RETURNS trigger AS $$
 DECLARE
-    v_lock      CONSTANT BIGINT  := 900116;
+v_lock      CONSTANT BIGINT  := 900116;
     v_prev_hash TEXT;
     v_seq       BIGINT;
     v_ts        TIMESTAMPTZ     := clock_timestamp();
@@ -62,12 +62,12 @@ DECLARE
 BEGIN
     PERFORM pg_advisory_xact_lock(v_lock);
 
-    SELECT seq, hash INTO v_seq, v_prev_hash
-    FROM audit_log
-    ORDER BY seq DESC
+SELECT seq, hash INTO v_seq, v_prev_hash
+FROM audit_log
+ORDER BY seq DESC
     LIMIT 1;
 
-    v_prev_hash := COALESCE(v_prev_hash, LPAD('', 64, '0'));
+v_prev_hash := COALESCE(v_prev_hash, LPAD('', 64, '0'));
     v_seq       := COALESCE(v_seq, 0) + 1;
 
     NEW.seq        := v_seq;
@@ -78,7 +78,7 @@ BEGIN
                  || '|' || COALESCE(NEW.target, '') || '|' || NEW.details::text || '|' || v_prev_hash;
 
     NEW.hash := encode(sha256(convert_to(v_payload, 'UTF8')), 'hex');
-    RETURN NEW;
+RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
 

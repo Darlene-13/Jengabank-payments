@@ -28,15 +28,17 @@ public class AuditController {
         this.events = events;
     }
 
+    /** Cursor pagination: pass ?cursor=<sequence> to fetch records older than that sequence. */
     @GetMapping
     public List<AuditRecord> recent(
             @RequestParam(name = "limit", defaultValue = "50") int limit,
+            @RequestParam(name = "cursor", required = false) Long cursor,
             @RequestHeader(name = SecurityEventLogger.ID_HEADER, required = false) String userId,
             @RequestHeader(name = SecurityEventLogger.ROLE_HEADER, required = false) String userRole) {
         Actor actor = actors.resolve(userId, userRole);
         requireAuditRole(actor, "/api/v1/audit");
-        int safeLimit = Math.min(Math.max(limit, 1), 100); // Cursor paging contract: max 100
-        return repository.recent(safeLimit);
+        int safeLimit = Math.min(Math.max(limit, 1), 100);   // max 100 per proposal
+        return repository.recent(safeLimit, cursor);
     }
 
     @GetMapping("/verify")

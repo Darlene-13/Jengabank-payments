@@ -14,7 +14,6 @@ import org.springframework.stereotype.Repository;
 @Repository
 public class AuditRepository {
 
-    // CHANGED: "seq" -> "sequence", "created_at" -> "ts"
     private static final RowMapper<AuditRecord> MAPPER = (rs, rowNum) -> new AuditRecord(
             rs.getLong("sequence"),
             rs.getString("actor"),
@@ -25,6 +24,9 @@ public class AuditRepository {
             rs.getString("hash"),
             rs.getTimestamp("ts").toInstant());
 
+    private static final String SELECT_COLUMNS =
+            "sequence, actor, action, target, details, prev_hash, hash, ts";
+
     private final JdbcTemplate jdbc;
 
     public AuditRepository(JdbcTemplate jdbc) {
@@ -32,7 +34,6 @@ public class AuditRepository {
     }
 
     public void insert(String actor, String action, String target, String detailsJson) {
-        // Only these 4 columns: sequence, ts, prev_hash, hash are assigned by the V3 trigger.
         jdbc.update(
                 "INSERT INTO audit_log (actor, action, target, details) VALUES (?, ?, ?, ?::jsonb)",
                 actor, action, target, detailsJson);
@@ -40,17 +41,31 @@ public class AuditRepository {
 
     public Optional<AuditRecord> latest() {
         List<AuditRecord> rows = jdbc.query(
-                "SELECT sequence, actor, action, target, details, prev_hash, hash, ts "
-                        + "FROM audit_log ORDER BY sequence DESC LIMIT 1",
+                "SELECT " + SELECT_COLUMNS + " FROM audit_log ORDER BY sequence DESC LIMIT 1",
                 MAPPER);
         return rows.stream().findFirst();
     }
 
+    /** Kept for tests and callers that do not use cursors. */
     public List<AuditRecord> recent(int limit) {
+        return recent(limit, null);
+    }
+
+    /**
+     * Cursor-paginated read. {@code cursor == null} starts at the newest record.
+     * Otherwise returns records with {@code sequence < cursor}, newest first.
+     */
+    public List<AuditRecord> recent(int limit, Long cursor) {
+        if (cursor == null) {
+            return jdbc.query(
+                    "SELECT " + SELECT_COLUMNS
+                            + " FROM audit_log ORDER BY sequence DESC LIMIT ?",
+                    MAPPER, limit);
+        }
         return jdbc.query(
-                "SELECT sequence, actor, action, target, details, prev_hash, hash, ts "
-                        + "FROM audit_log ORDER BY sequence DESC LIMIT ?",
-                MAPPER, limit);
+                "SELECT " + SELECT_COLUMNS
+                        + " FROM audit_log WHERE sequence < ? ORDER BY sequence DESC LIMIT ?",
+                MAPPER, cursor, limit);
     }
 
     public long countByAction(String action) {
@@ -61,10 +76,7 @@ public class AuditRepository {
         return count == null ? 0L : count;
     }
 
-    /**
-     * Walks the whole hash chain using the V3 {@code audit_verify()} function.
-     * Returns {@code true} if the chain is intact, {@code false} if a row was tampered with.
-     */
+    /** Walks the whole hash chain using the V3 {@code audit_verify()} function. */
     public AuditVerifyResult verifyChain() {
         return jdbc.queryForObject(
                 "SELECT valid, checked, broken_at FROM audit_verify()",
@@ -74,6 +86,5 @@ public class AuditRepository {
                         rs.getObject("broken_at") == null ? null : rs.getLong("broken_at")));
     }
 
-    /** Result of walking the audit chain. */
     public record AuditVerifyResult(boolean valid, long checked, Long brokenAt) {}
 }

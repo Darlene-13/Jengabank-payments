@@ -8,6 +8,7 @@ import java.time.OffsetDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.UUID;
 import org.springframework.stereotype.Component;
 import org.springframework.web.context.request.RequestContextHolder;
 import org.springframework.web.context.request.ServletRequestAttributes;
@@ -16,16 +17,17 @@ import org.springframework.web.context.request.ServletRequestAttributes;
  * Emits structured security events to stdout.
  *
  * <p>Every event is a single JSON line carrying the exact keys the JengaSec
- * judging pipeline expects: {@code ts, src_ip, method, path, status, user, action},
- * plus event-specific fields. It is written straight to {@code System.out} so it
- * reaches the judges within milliseconds, independently of logback configuration
- * or transaction outcome.
+ * judging pipeline expects: {@code ts, src_ip, method, path, status, user,
+ * action, requestId}, plus event-specific fields. It is written straight to
+ * {@code System.out} so it reaches the judges within milliseconds, independently
+ * of logback configuration or transaction outcome.
  */
 @Component
 public class SecurityEventLogger {
 
     public static final String ID_HEADER = "X-User-Id";
     public static final String ROLE_HEADER = "X-User-Role";
+    public static final String REQUEST_ID_HEADER = "X-Request-Id";
 
     private final ObjectMapper mapper;
     private final Clock clock;
@@ -59,6 +61,7 @@ public class SecurityEventLogger {
         line.put("status", status);
         line.put("user", user == null || user.isBlank() ? "anonymous" : user);
         line.put("action", action);
+        line.put("requestId", currentRequestId());
         if (extra != null) {
             for (Map.Entry<String, Object> e : extra.entrySet()) {
                 if (e.getValue() != null && !line.containsKey(e.getKey())) {
@@ -96,6 +99,16 @@ public class SecurityEventLogger {
             return forwarded.split(",")[0].trim();
         }
         return request.getRemoteAddr();
+    }
+
+    /** Pulls X-Request-Id from the current request, or generates a fresh UUID. */
+    private String currentRequestId() {
+        ServletRequestAttributes attrs = (ServletRequestAttributes) RequestContextHolder.getRequestAttributes();
+        if (attrs == null) {
+            return UUID.randomUUID().toString();
+        }
+        String hdr = attrs.getRequest().getHeader(REQUEST_ID_HEADER);
+        return (hdr == null || hdr.isBlank()) ? UUID.randomUUID().toString() : hdr;
     }
 
     private record RequestInfo(String srcIp, String method, String path) {
