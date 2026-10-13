@@ -3,8 +3,8 @@
 | Field            | Value                                                                                                                                                                        |
 | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Owner            | Security Lead                                                                                                                                                                |
-| Version          | 1.0                                                                                                                                                                          |
-| Date             | 12 Oct 2026                                                                                                                                                                  |
+| Version          | 1.1                                                                                                                                                                          |
+| Date             | 13 Oct 2026                                                                                                                                                                  |
 | Method           | STRIDE; 5x5 likelihood/impact scoring (NIST SP 800-30, ISO/IEC 27005); OWASP API Security Top 10 (2023)                                                                      |
 | Related          | `security-objectives.md`, `security-test-plan.md`, `log-actions.md`, `risk-register.md`, `live-defence-runbook.md`                                                           |
 
@@ -26,12 +26,13 @@ Each assumption is verified against the running build and recorded as passed or 
 
 | ID  | Assumption                                                                                                         |
 | --- | ------------------------------------------------------------------------------------------------------------------ |
-| AS1 | Session tokens are DB-backed (stateful) UUIDs stored in the sessions table with revocation (revoked_at) and expiry [A] |
-| AS2 | TLS terminates in front of the app in production; the local demo may use HTTP [A]                                  |
+| AS1 | Session tokens are opaque random values generated in `SessionService`; only SHA-256 hashes are stored in the `sessions` table, and revocation/expiry are enforced server-side. They are not JWTs [A] |
+| AS2 | TLS terminates in front of the app in production; the application receives plain HTTP internally and does not enforce HSTS itself [A] |
 | AS3 | Database credentials and the signing key come from environment or secret store, not the image [A]                  |
 | AS4 | One or more app instances serve concurrent requests; the database provides row locks or serializable isolation [A] |
 | AS5 | Seed and demo users exist for the defence [A]                                                                      |
 | AS6 | Only CUSTOMER can create transfers, per the endpoint contract                                                      |
+| AS7 | The application DB role owns the tables; triggers block direct audit-row mutation and the hash chain detects bypasses [A] |
 
 ## 4. System architecture
 
@@ -84,7 +85,7 @@ flowchart LR
 
 ### 4.5 Entry points
 
-Public: `GET /healthz`, `GET /readyz`, `GET /openapi.json`, `POST /api/v1/auth/login`. Authenticated: the remaining 16 endpoints in the contract (customer, maker and checker routes). Other surfaces: the PWA and its service worker, the container and CI, the database, and any framework defaults (actuator, consoles).
+Public: `GET /healthz`, `GET /readyz`, `GET /openapi.json`, `POST /api/v1/auth/login`. `/swagger-ui` is disabled in the deployed image. Authenticated: the remaining 23 endpoints in the contract (customer, maker and checker routes). Other surfaces: the PWA and its service worker, the container and CI, the database, and any framework defaults (actuator, consoles).
 
 ## 5. Assets
 
@@ -139,7 +140,7 @@ Columns: STRIDE category, actor, likelihood / impact, inherent score, required m
 | T1 | Spoofing | Credential brute force or stuffing on `/auth/login` | TA1 | H / H | 25 Critical | Account lockout, rate limiting [G1], BCrypt with adequate cost | `auth.login.failed`, `auth.account.locked`, `rate.limited` | AT-01, RL-01 | SO-17, SO-19 | Medium |
 | T2 | Information disclosure | Username enumeration through differing errors or timing | TA1 | H / M | 15 High | Identical response and timing for unknown user and wrong password [A] | `auth.login.failed` | AT-02 | SO-17 | Low |
 | T3 | Denial of service | Lockout used to deny service to a victim | TA1, TA2 | M / M | 9 Medium | Time-boxed lockout; per-account and per-IP limits | `auth.account.locked` | AT-03 | SO-17 | Medium |
-| T4 | Spoofing, Tampering | Forged or tampered token, `alg: none`, role claim edit | TA1, TA2 | M / H | 15 High | Pin signing algorithm, strong secret, enforce `exp`, validate signature, role from server-side data | `auth.token.invalid` | AT-04 | SO-11 | Low |
+| T4 | Spoofing, Tampering | Random or modified token, revoked token, expired session, missing or malformed Authorization header, token in query string | TA1, TA2 | M / H | 15 High | Validate opaque server-side session tokens, revoke on logout, enforce expiry and reject invalid headers/query strings | `auth.token.invalid` | AT-04 | SO-11 | Low |
 | T5 | Spoofing | Stolen token reused after logout | TA1, TA3 | M / H | 15 High | Short expiry plus server-side session revocation (sessions.revoke_at) on logout [G4]; DB-backed stateful sessions [A] | `auth.token.invalid`, `auth.logout` | AT-05 | SO-18 | Medium |
 | T6 | Information disclosure | Token or credentials leaked in URLs, logs or error bodies | TA1, TA7 | M / H | 15 High | Header-only tokens, log redaction | — | LG-02 | SO-21 | Low |
 
@@ -162,12 +163,12 @@ Columns: STRIDE category, actor, likelihood / impact, inherent score, required m
 | T14 | Information disclosure | A user replays another's key and reads the stored response | TA2 | M / M | 9 Medium | Scope keys to user and endpoint [G2] | `idempotency.conflict` | ID-06 | SO-07 | Low |
 | T15 | Tampering | Invalid amounts: zero, negative, overflow, decimals, wrong currency, same-account, missing destination | TA2 | H / H | 25 Critical | Strict validation of `amountMinor` (long) and `currency: "KES"`; overflow checks such as `Math.addExact` | `transfer.invalid_amount`, `request.invalid` | AM-01 to AM-06 | SO-08 | Low |
 | T16 | Tampering | Debits do not equal credits after a partial failure | TA2, TA7 | M / H | 15 High | Single DB transaction; invariant tests; reconciliation | `reconciliation.failed` | LD-01 | SO-01, SO-02 | Low |
-| T17 | Repudiation | Duplicate or concurrent reversal, reversal of a reversal, reversal of a non-COMPLETED transfer | TA4, TA2 | H / H | 25 Critical | State machine plus unique constraint of one reversal per transfer | `reversal.duplicate_denied` | RV-01 to RV-04 | SO-09 | Low |
-| T18 | Elevation of privilege | Reversal without authority, or by a maker on a transfer they initiated | TA4 | M / H | 15 High | Role check; separation of duties; caps and audit; second approval or accepted risk [G5] | `authz.access.denied`, `reversal.created` | RV-05 | SO-15 | Medium |
+| T17 | Repudiation | Duplicate or concurrent reversal, or reversal of a non-COMPLETED transfer | TA4, TA2 | H / H | 25 Critical | State machine plus unique constraint of one reversal per journal entry | `reversal.duplicate_denied` | RV-01 to RV-03 | SO-09 | Low |
+| T18 | Elevation of privilege | Reversal without authority, or by a maker on a transfer they initiated | TA4 | M / H | 15 High | Role check; separation of duties; KES 250,000+ reversal requires a different checker; below that threshold the maker can reverse and every reversal is audited | `authz.access.denied`, `reversal.created` | RV-05 | SO-15 | Medium |
 | T19 | Tampering | Limit bypass by splitting transfers or racing the per-transfer, daily and velocity counters | TA2, TA3 | H / M | 15 High | Atomic counters, transactional limit checks, velocity and fraud rules | `limit.exceeded`, `fraud.review`, `fraud.block` | LM-01 to LM-03 | SO-10 | Medium |
-| T39 | Tampering | Pending transfers exceed the balance; funds are not reserved or re-checked at approval [G6] | TA2 | M / H | 15 High | Reserve funds on PENDING_APPROVAL, or re-check balance and limits at approval | `transfer.insufficient_funds` | MC-03 | SO-39 | Medium |
+| T39 | Tampering | Pending transfers exceed the balance because funds are not reserved while waiting for approval [G6] | TA2 | M / H | 15 High | Approval re-checks the sender balance and rejects with `INSUFFICIENT_FUNDS`; a database trigger also blocks overdrafts | `transfer.insufficient_funds` | MC-03 | SO-39 | Medium |
 | T40 | Denial of service | Deadlock or 500 under opposing parallel transfers (A to B and B to A) | TA2 | M / M | 9 Medium | Consistent lock ordering | none | CC-01 | SO-40 | Low |
-| T43 | Tampering | Daily limit window boundary abuse: UTC day versus Nairobi UTC+3 [G7] | TA2 | M / M | 9 Medium | Documented UTC window; boundary tests across midnight UTC | `limit.exceeded` | LM-02 | SO-43 | Low |
+| T43 | Tampering | Daily limit window boundary abuse: Nairobi midnight (UTC+3) versus UTC midnight [G7] | TA2 | M / M | 9 Medium | Documented Nairobi-day window; boundary tests across 21:00 UTC | `limit.exceeded` | LM-02 | SO-43 | Low |
 
 ### 8.4 Maker-checker and fraud
 
@@ -183,8 +184,8 @@ Columns: STRIDE category, actor, likelihood / impact, inherent score, required m
 
 | ID | STRIDE | Threat | Actor | L / I | Score | Mitigation | Events | Tests | SO | Residual |
 |---|---|---|---|---|---|---|---|---|---|---|
-| T23 | Tampering, Repudiation | Insider edits or deletes audit rows | TA7 | M / H | 15 High | Append-only at DB level (no UPDATE or DELETE grant); hash chain; `/audit/verify` | `audit.chain.broken` | AU-01, AU-02 | SO-22, SO-23 | Low |
-| T24 | Repudiation | Security-relevant actions not logged, or logs forged through CRLF injection | TA1, TA2 | M / M | 9 Medium | Structured JSON, input encoding, requestId on every entry, all events in the shared list [G8] | all shared events | LG-01, LG-02, LG-03 | SO-20, SO-21 | Low |
+| T23 | Tampering, Repudiation | Insider edits or deletes audit rows | TA7 | M / H | 15 High | App DB role owns the tables; triggers block direct mutation, and the hash chain detects any bypass | `audit.chain.broken` | AU-01, AU-02 | SO-22, SO-23 | Low |
+| T24 | Repudiation | Security-relevant actions not logged, or logs forged through CRLF injection | TA1, TA2 | M / M | 9 Medium | Structured JSON, input encoding, `requestId` on every entry, and the current event catalog in `Actions.java` | all shared events | LG-01, LG-02, LG-03 | SO-20, SO-21 | Low |
 | T25 | Tampering | Reconciliation run is spoofed or its result hidden | TA5 | L / M | 3 Low | CHECKER-only access, audited, immutable results | `reconciliation.passed`, `reconciliation.failed` | RC-01 | SO-24 | Low |
 | T44 | Repudiation | Logs lost on container restart | TA7 | M / M | 9 Medium | Log to stdout and persist to a volume or collector [A] | none | LG-04 | SO-44 | Medium |
 
@@ -196,10 +197,10 @@ Columns: STRIDE category, actor, likelihood / impact, inherent score, required m
 | T27 | Denial of service, Tampering | Oversized or malformed bodies; unknown fields (mass assignment) | TA1, TA2 | H / M | 15 High | 16 KB cap; reject unknown fields; Bean Validation; DTOs separate from entities | `request.invalid` | IN-02, IN-03, IN-04 | SO-26 | Low |
 | T28 | Denial of service | Request flooding on transfers or login | TA1 | H / M | 15 High | Login rate limiting implemented (per IP, per minute); general API rate limiting [G1] | `rate.limited` | RL-01 | SO-19 | Medium |
 | T29 | Information disclosure | Verbose errors expose stack traces, SQL or framework banners | TA1 | M / M | 9 Medium | Uniform error body: `code`, `message`, `requestId` | `request.invalid` | IL-01 | SO-27 | Low |
-| T30 | Information disclosure | Exposed debug or actuator endpoints, or an over-detailed `/openapi.json` | TA1 | M / M | 9 Medium | Disable or restrict; review spec content | none | IL-02 | SO-28 | Low |
+| T30 | Information disclosure | Exposed debug or actuator endpoints, or an over-detailed `/openapi.json` | TA1 | M / M | 9 Medium | Disable or restrict; `/swagger-ui` is disabled in the deployed image while `/openapi.json` remains public by team decision and is reviewed as the public contract | none | IL-02 | SO-28 | Low |
 | T31 | Tampering | XSS in Angular through free-text fields or unsafe bindings | TA2 | M / H | 15 High | No `innerHTML`, no sanitiser bypass; CSP | none | FE-01 | SO-30 | Low |
 | T32 | Information disclosure | Token in `localStorage`, or the service worker caching authenticated responses | TA1, TA3 | M / H | 15 High | In-memory or secure-cookie storage; exclude `/api` from the service worker cache | none | FE-02, FE-03 | SO-31 | Low |
-| T33 | Tampering | Permissive CORS or missing security headers | TA1 | M / M | 9 Medium | Origin allowlist; CSP, HSTS, `X-Content-Type-Options`, `X-Frame-Options`; `Cache-Control: no-store` | none | FE-04 | SO-32 | Low |
+| T33 | Tampering | Insecure frontend configuration or missing security headers | TA1 | M / M | 9 Medium | No app-level CORS configuration, same-origin only; the app sends CSP with `frame-ancestors 'none'`, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Cache-Control: no-store`; TLS termination happens before the app, so HSTS is not enforced at the app layer | none | FE-04 | SO-32 | Low |
 | T34 | Denial of service | Pagination abuse: limit above 100 or a malformed cursor | TA2 | M / L | 3 Low | Enforce max 100 and default 50; validate cursor | `request.invalid` | PG-01 | SO-29 | Low |
 
 ### 8.7 Build and deployment
@@ -266,16 +267,18 @@ Owners follow the areas assigned in the Team Build Plan. The Security Lead verif
 
 Residual ratings above assume controls are implemented and tests pass. Each unresolved gap (G1 to G10 in `docs/risk-register.md`) raises the residual rating of its linked threat. A risk not fixed before the freeze is entered in the acceptance record with an approver, rationale, compensating control and expiry.
 
-## 14. Open questions for the Build Lead
+## 14. Resolved implementation questions
 
-1. Who owns rate limiting (T1, T28)?
-2. Are tokens stateless JWTs, and how does logout invalidate them (T5)?
-3. What are the idempotency key scope and storage (T12, T13, T14)?
-4. Which DB role does the app use, and can it UPDATE or DELETE the audit table (T23)?
-5. What is the staff visibility scope on `GET /transfers` (T10)?
-6. Where is the token stored in the PWA, and what does the service worker cache (T32)?
-7. Are funds reserved on PENDING_APPROVAL, or re-checked at approval (T39)?
-8. Can any user hold more than one role (T18, T20, T42)?
+The following questions were settled by the implementation review and code inspection on 13 Oct 2026:
+
+1. Rate limiting is owned by the app and enforced per IP or per user as configured in the security and limit services; no separate owner remains open (T1, T28).
+2. Session tokens are opaque random bearer values; only their SHA-256 hashes are stored in the `sessions` table. Logout revokes the server-side session row, and the filter rejects missing, malformed, expired, revoked and query-string tokens (T4, T5, T6).
+3. Idempotency keys are scoped per user and endpoint, and replayed responses are stored and reused for the same key and request hash. A `422` refusal is stored and replayed for the same key; a different body produces a conflict (T12, T13, T14).
+4. The application uses one DB role that owns the tables; triggers prevent direct audit-row mutation, while the hash chain detects tampering that bypasses those triggers (T23).
+5. Staff visibility is limited by role and ownership checks; customers see only their own data, while MAKER and CHECKER see the relevant shared data set (T7, T8, T10).
+6. The frontend uses no app-level CORS configuration; the app sends CSP and security headers and relies on same-origin access only. The service worker is not configured to cache authenticated API responses (T32, T33).
+7. Funds are not reserved while a transfer is pending. At approval, the application re-checks the sender balance and rejects with `INSUFFICIENT_FUNDS` if needed; a database trigger also prevents overdrafts (T39).
+8. Users are assigned one role in the app model; role checks are enforced at the endpoint and method level, and self-approval is rejected (T18, T20, T42).
 
 ## 15. Review and maintenance
 
@@ -291,3 +294,4 @@ OWASP Threat Modeling Cheat Sheet; Microsoft STRIDE; NIST SP 800-30; ISO/IEC 270
 | ------- | ----------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | 0.1     | 12 Oct 2026 | Security Lead | Initial baseline (T1 to T38)                                                                                                                                                                     |
 | 1.0     | 12 Oct 2026 | Security Lead | Merged the two drafts; added numeric scoring, residual ratings, owners, attack trees and OWASP mapping; added T39 to T44 (pending funds, deadlock, queue flood, collusion, UTC window, log loss) |
+| 1.1     | 13 Oct 2026 | Security Lead | Resolved the remaining implementation questions from code review: opaque server-side session tokens, Nairobi-midnight daily reset, same-origin/no-CORS frontend posture, no app-level HSTS, no secrets in the image, and the accepted DB-role/audit-chain model |

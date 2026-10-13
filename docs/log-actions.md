@@ -3,8 +3,8 @@
 | Field | Value |
 |---|---|
 | Owner | Dev 2 (logging) |
-| Version | 1.1 |
-| Date | 12 Oct 2026 |
+| Version | 1.2 |
+| Date | 13 Oct 2026 |
 | Related | `event-logging-verification-matrix.md`, `security-test-plan.md` |
 
 ## 1. Purpose
@@ -13,53 +13,72 @@ This is the reference for every security event the application logs. It defines 
 
 ## 2. Log line format
 
-Logs are structured JSON, one object per line, UTC ISO 8601 timestamps, with a request ID that matches the `X-Request-Id` response header.
+Logs follow the JengaSec contract: one structured JSON object per line.
 
-Required fields: `timestamp`, `event`, `requestId`.
+Required fields for request/decision records are:
 
-Additional fields include: `level` (`INFO`, `WARN`, `ERROR`), `actor` (user ID or `anonymous`), `role` (`CUSTOMER`, `MAKER`, `CHECKER`, or `none`), `ip`, `method`, `path` (template, no sensitive query params), `status`, `outcome` (`SUCCESS`, `DENIED`, `FAILURE`), and `detail` (event-specific).
+- `ts` (UTC ISO-8601)
+- `src_ip`
+- `method`
+- `path`
+- `status`
+- `user` (empty string when unauthenticated)
+- `action`
+- `requestId`
 
-Never log: passwords, tokens, signing keys, password hashes, full account numbers, or raw request bodies.
+`requestId` must match the response header `X-Request-Id`. `path` should be the route template without sensitive query-string values. Do not log passwords, tokens, signing keys, password hashes, full account numbers, or raw request bodies.
+
+Security events (`logger_name: security`) raised inside an authenticated request always carry `username`, including rejections such as validation errors, unreadable bodies and role denials, so events can be grouped by user without a `requestId` join.
+
+The runtime may include additional fields, but the verification matrix validates the JengaSec contract above rather than the older `actor/anonymous`, `event`, or `timestamp` naming.
 
 ## 3. Events
 
+This list matches the current `Actions.java` constants.
+
 | # | Event | Level | Trigger | Key `detail` fields |
 |---|---|---|---|---|
-| 1 | `auth.login.success` | INFO | Valid login | — |
-| 2 | `auth.login.failed` | WARN | Wrong password/unknown user | attempted username |
-| 3 | `auth.account.locked` | WARN | Lockout triggered or attempt on locked account | failure count, lock expiry |
-| 4 | `auth.token.invalid` | WARN | Invalid/missing/malformed/expired token | reason code |
-| 5 | `authz.access.denied` | WARN | Ownership/role failure | resource type, resource ID, required role |
-| 6 | `account.viewed` | INFO | Read own account | accountId |
-| 7 | `transfer.created` | INFO | Transfer accepted | transferId, amountMinor, source, destination |
-| 8 | `transfer.completed` | INFO | Status COMPLETED | transferId |
-| 9 | `transfer.pending_approval` | INFO | Status PENDING_APPROVAL | transferId, reason |
-| 10 | `transfer.blocked` | WARN | Status BLOCKED | transferId, reason |
-| 11 | `transfer.insufficient_funds` | WARN | Insufficient balance | transferId |
-| 12 | `transfer.invalid_amount` | WARN | Invalid amount | reason |
-| 13 | `fraud.allow` | INFO | Fraud decision ALLOW | rule/score |
-| 14 | `fraud.review` | WARN | Fraud decision REVIEW | rule |
-| 15 | `fraud.block` | WARN | Fraud decision BLOCK | rule |
-| 16 | `limit.exceeded` | WARN | Limit exceeded | limit type, limit value |
-| 17 | `idempotency.replayed` | INFO | Same key+body replay | key, original transferId |
-| 18 | `idempotency.conflict` | WARN | Same key, diff body | key |
-| 19 | `approval.approved` | INFO | Checker approves | transferId, approver |
-| 20 | `approval.rejected` | INFO | Checker rejects | transferId, approver |
-| 21 | `approval.self_approval_denied` | WARN | Self-approval | transferId, actor |
-| 22 | `reversal.created` | INFO | Reversal posted | original transferId, reversal transferId |
-| 23 | `reversal.duplicate_denied` | WARN | Duplicate reversal | original transferId |
-| 24 | `reconciliation.passed` | INFO | Balanced | run ID, totals |
-| 25 | `reconciliation.failed` | ERROR | Discrepancy | run ID, delta |
-| 26 | `audit.chain.ok` | INFO | Valid chain | sequence count, last sequence |
-| 27 | `audit.chain.broken` | ERROR | Broken chain | sequence number |
-| 28 | `request.invalid` | WARN | Invalid request | reason code |
-| 29 | `rate.limited` | WARN | 429 returned | route, actor/IP |
-| 30 | `auth.logout` | INFO | Logout | actor, role |
+| 1 | `http.request` | INFO | Incoming request entry | method, path, src_ip, user |
+| 2 | `server.error` | ERROR | Unhandled server exception | error class, path |
+| 3 | `db.guard_triggered` | WARN | Database guard/constraint block | table, rule |
+| 4 | `auth.login.success` | INFO | Valid login | username |
+| 5 | `auth.login.failed` | WARN | Wrong password/unknown user | attempted username |
+| 6 | `auth.account.locked` | WARN | Lockout triggered or attempt on locked account | failure count, lock expiry |
+| 7 | `auth.token.invalid` | WARN | Invalid, revoked, expired, malformed or query-string token | reason code |
+| 8 | `auth.logout` | INFO | Logout | user, role |
+| 9 | `authz.access.denied` | WARN | Ownership/role failure | username; ownership: resource type, resource ID; role: `reason: role`, path, src_ip |
+| 10 | `account.viewed` | INFO | Read own account | accountId |
+| 11 | `transfer.created` | INFO | Transfer accepted | transferId, amountMinor, source, destination |
+| 12 | `transfer.completed` | INFO | Status COMPLETED | transferId |
+| 13 | `transfer.pending_approval` | INFO | Status PENDING_APPROVAL | transferId, reason |
+| 14 | `transfer.blocked` | WARN | Status BLOCKED | transferId, reason |
+| 15 | `transfer.insufficient_funds` | WARN | Insufficient balance | transferId |
+| 16 | `transfer.invalid_amount` | WARN | Invalid amount | reason |
+| 17 | `fraud.allow` | INFO | Fraud decision ALLOW | rule/score |
+| 18 | `fraud.review` | WARN | Fraud decision REVIEW | rule |
+| 19 | `fraud.block` | WARN | Fraud decision BLOCK | rule |
+| 20 | `limit.exceeded` | WARN | Limit exceeded | limit type, limit value |
+| 21 | `idempotency.replayed` | INFO | Same key+body replay | key, original transferId |
+| 22 | `idempotency.conflict` | WARN | Same key, different body | key |
+| 23 | `approval.approved` | INFO | Checker approves | transferId, approver |
+| 24 | `approval.rejected` | INFO | Checker rejects | transferId, approver |
+| 25 | `approval.self_approval_denied` | WARN | Self-approval | transferId, actor |
+| 26 | `reversal.created` | INFO | Reversal posted | original transferId, reversal transferId |
+| 27 | `reversal.duplicate_denied` | WARN | Duplicate reversal | original transferId |
+| 28 | `reversal.denied` | WARN | Reversal denied for role/state reasons beyond duplicates | original transferId, reason |
+| 29 | `reversal.pending_approval` | INFO | Reversal pending checker approval | reversalId, reason |
+| 30 | `reconciliation.passed` | INFO | Balanced | run ID, totals |
+| 31 | `reconciliation.failed` | ERROR | Discrepancy | run ID, delta |
+| 32 | `audit.chain.ok` | INFO | Valid chain | sequence count, last sequence |
+| 33 | `audit.chain.broken` | ERROR | Broken chain | sequence number |
+| 34 | `request.invalid` | WARN | Invalid request | reason code |
+| 35 | `rate.limited` | WARN | 429 returned | route, actor/IP |
 
 ## 4. Quick mapping
 
 | Outcome | HTTP | Events |
 |---|---|---|
+| Request received | 200/201/etc. | `http.request` |
 | Transfer completed | 201 | `transfer.created`, `fraud.allow`, `transfer.completed` |
 | Pending approval (REVIEW) | 202 | `transfer.created`, `fraud.review`, `transfer.pending_approval` |
 | Blocked | 422 | `transfer.created`, `fraud.block`, `transfer.blocked` |
@@ -70,12 +89,10 @@ Never log: passwords, tokens, signing keys, password hashes, full account number
 | Locked account | 423 | `auth.account.locked` |
 | Non-owned resource | 404 | `authz.access.denied` |
 | Wrong role | 403 | `authz.access.denied` |
+| Logout | 204/200 | `auth.logout` |
+| Reversal pending approval | 202 | `reversal.pending_approval` |
+| Reversal denied | 400/403/409 | `reversal.denied` |
 
-## 5. Potential additions
+## 5. Implementation note
 
-| Event | Purpose |
-|---|---|
-| `approval.invalid_state` | Specific event for approving/rejecting non-pending transfer |
-| `reversal.denied` | Denial beyond duplicates (role/state) |
-| `audit.viewed` | Audit log reads by MAKER/CHECKER |
-| `reconciliation.run_denied` | Non-CHECKER attempts to run reconciliation |
+`http.request` and `db.guard_triggered` are current `Actions.java` entries; they are not optional additions after the fact.
