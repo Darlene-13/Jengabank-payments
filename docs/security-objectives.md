@@ -3,8 +3,8 @@
 | Field            | Value                                                                                                                              |
 | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
 | Owner            | Security Lead                                                                                                                      |
-| Version          | 1.0                                                                                                                                |
-| Date             | 12 Oct 2026                                                                                                                        |
+| Version          | 1.1                                                                                                                                |
+| Date             | 13 Oct 2026                                                                                                                        |
 | Related          | `threat-model.md`, `security-test-plan.md`, `log-actions.md`, `risk-register.md`                                                    |
 
 ## 1. Purpose
@@ -39,22 +39,22 @@ Evidence for every objective is stored under `evidence/<tag>/<test-id>/`. Test I
 | ----- | -------------------------------------------------------------------------------------------------------------------------------------------------- | --- | ------------------------------------------------------------------------------------------------------------------- | -------- | ------------------- | ---------------------------------------------- | ------------ |
 | SO-01 | For every journal, total debits equal total credits                                                                                                | P0  | Invariant SQL 1 returns no rows after every test run                                                                | T16      | LD-01               | `reconciliation.failed`                        | V11, API6    |
 | SO-02 | No sequence of API calls, including parallel ones, changes the total ledger balance; money is only moved                                           | P0  | Invariant SQL 2 is zero after CC-01 and every run                                                                   | T11, T16 | LD-01, CC-01        | none                                           | V11, API6    |
-| SO-03 | No account can be overdrawn, even under N parallel transfers from one account                                                                      | P0  | 20 parallel debits of 100 against a balance of 1000: at most 10 succeed; invariant SQL 3 and 4 clean                | T11      | CC-01               | `transfer.insufficient_funds`                  | V11, API6    |
+| SO-03 | No account can be overdrawn, even under N parallel transfers from one account | P0 | 20 parallel debits of 100 against a balance of 1000: at most 10 succeed; invariant SQL 1–3 clean | T11 | CC-01 | `transfer.insufficient_funds` | V11, API6 |
 | SO-04 | A money-changing POST without an Idempotency-Key is rejected with 400 and moves no funds                                                           | P0  | 400 for a missing and a non-UUID key; ledger unchanged                                                              | T12      | ID-01               | `request.invalid`                              | V13, API6    |
 | SO-05 | Same key and same body returns the original response and moves funds once; same key with a different body returns 409                              | P0  | Replay returns original response, one ledger posting; mismatch returns 409; applies to approve, reject and reversal | T12      | ID-02, ID-03, ID-04 | `idempotency.replayed`, `idempotency.conflict` | V11, API6    |
 | SO-06 | Concurrent requests with the same key produce exactly one transfer                                                                                 | P0  | 20 parallel same-key requests create one transfer; invariant SQL 5 clean                                            | T13      | ID-05               | `idempotency.replayed`                         | V11, API6    |
 | SO-07 | An idempotency key from one user cannot be used to read or affect another user's transfer                                                          | P0  | No cross-user response or effect (gap G2 resolved as per user and endpoint)                                         | T14      | ID-06               | `idempotency.conflict`                         | V4, API1     |
 | SO-08 | Only a positive `amountMinor` within long range, with `currency: "KES"`, to an existing and different account, is accepted                         | P0  | All other inputs return 400 or 422 and move no funds                                                                | T15      | AM-01 to AM-06      | `transfer.invalid_amount`, `request.invalid`   | V5, API6     |
-| SO-09 | A transfer can be reversed at most once; only COMPLETED transfers are reversible; a reversal cannot be reversed, including under parallel requests | P0  | Parallel reversals give one success; invariant SQL 6 and 7 clean                                                    | T17      | RV-01 to RV-04      | `reversal.duplicate_denied`                    | V11, API6    |
+| SO-09 | A transfer can be reversed at most once; only COMPLETED transfers are reversible; a reversal is a journal entry and cannot itself be reversed | P0  | Parallel reversals give one success; invariant SQL 6 and 7 clean                                                    | T17      | RV-01 to RV-03      | `reversal.duplicate_denied`                    | V11, API6    |
 | SO-10 | Per-transfer, daily and velocity limits cannot be bypassed by splitting or racing requests                                                         | P1  | At, below and above each limit return the correct status; parallel requests do not exceed limits in aggregate       | T19      | LM-01 to LM-03      | `limit.exceeded`                               | V11, API6    |
 
 ### 4.2 Identity and access
 
 | ID | Objective | Pri | Success criteria | Threats | Tests | Events | ASVS / OWASP |
 |---|---|---|---|---|---|---|---|
-| SO-11 | Every protected endpoint rejects missing, expired, tampered, `alg: none` or wrongly signed tokens with 401 | P0 | All token variants in AT-04 return 401 | T4 | AT-04 | `auth.token.invalid` | V3, API2 |
+| SO-11 | Every protected endpoint rejects missing, malformed, revoked, expired or otherwise invalid session tokens with 401 | P0 | All token variants in AT-04 return 401 | T4 | AT-04 | `auth.token.invalid` | V3, API2 |
 | SO-12 | A user can never read another user's accounts, entries or transfers; non-owned resources return 404 | P0 | Zero leakage across cross-user tests; same body as a nonexistent ID | T7 | AZ-01 | `authz.access.denied` | V4, API1 |
-| SO-13 | A role cannot call endpoints reserved for a higher role | P0 | Role matrix over all 20 endpoints matches the contract | T8 | AZ-02 | `authz.access.denied` | V4, API5 |
+| SO-13 | A role cannot call endpoints reserved for a higher role | P0 | Role matrix over all 23 endpoints matches the contract | T8 | AZ-02 | `authz.access.denied` | V4, API5 |
 | SO-14 | Identity and role are derived only from the token; values in body, query or headers are ignored | P0 | Injected identity and role values have no effect | T9 | AZ-03 | none | V3, API5 |
 | SO-15 | A user cannot approve their own pending transfer, and reversal is possible only for the MAKER role [confirm with Build Lead whether any user holds more than one role] | P0 | Self-approval returns 403 or 422; reversal by CUSTOMER, CHECKER or anonymous is refused | T18, T20 | MC-01, RV-05 | `approval.self_approval_denied`, `authz.access.denied` | V4, API5 |
 | SO-16 | An approval or rejection applies only to a transfer in PENDING_APPROVAL, and only once, even under parallel requests | P0 | One outcome and one posting for every invalid or parallel sequence | T21 | MC-02, MC-03 | `approval.approved`, `approval.rejected` | V11, API6 |
@@ -72,13 +72,13 @@ Evidence for every objective is stored under `evidence/<tag>/<test-id>/`. Test I
 | SO-40 | No deadlock or 500 under opposing parallel transfers | P1 | Repeated A to B and B to A runs give zero 500s and zero hangs | T40 | CC-01 | none | V11, API4 |
 | SO-41 | A flood of pending transfers cannot clog the checker queue | P2 | Per-user pending cap or velocity limit and 429 under burst | T41 | RL-01, LM-03 | `limit.exceeded`, `rate.limited` | API4 |
 | SO-42 | Maker-checker collusion is detectable even though it cannot be prevented | P2 | Initiator and approver recorded on every approval and reversal; reconciliation flags imbalances | T42 | LG-01, RC-01 | `approval.approved`, `reversal.created` | V7 |
-| SO-43 | The daily limit window is defined in UTC, documented and tested at the boundary | P2 | Behaviour across midnight UTC matches the documented window (gap G7) | T43 | LM-02 | `limit.exceeded` | V11 |
+| SO-43 | The daily limit window is defined in Nairobi time and tested at the Nairobi-midnight boundary | P2 | Behaviour across Nairobi midnight (21:00 UTC) matches the documented window (gap G7) | T43 | LM-02 | `limit.exceeded` | V11 |
 
 ### 4.4 Detection and evidence
 
 | ID | Objective | Pri | Success criteria | Threats | Tests | Events | ASVS / OWASP |
 |---|---|---|---|---|---|---|---|
-| SO-20 | Every event in the shared event list fires when its trigger occurs, with a requestId, a UTC ISO 8601 timestamp and the actor | P0 | 28 of 28 events verified in the logging matrix | T24 | LG-01 | all 28 | V7 |
+| SO-20 | Every event in the shared event list fires when its trigger occurs, with the JengaSec log contract (`ts`, `src_ip`, `method`, `path`, `status`, `user`, `action`, `requestId`) | P0 | All 35 current `Actions.java` events are explicitly verified in the logging matrix, including required fields and no secret leakage | T24 | LG-01 | all 35 | V7 |
 | SO-21 | Logs contain no passwords, tokens or full account details, and user input cannot forge log lines | P1 | Searches return nothing; CRLF and oversize inputs keep logs valid single-line JSON | T6, T24 | LG-02, LG-03 | none | V7 |
 | SO-22 | Modifying or deleting any audit row is detected by `/audit/verify` and raises `audit.chain.broken` | P0 | Edit and delete on a DB copy both fail verification; concurrent writes do not fork the chain | T23 | AU-01 | `audit.chain.broken` | V7 |
 | SO-23 | The application's DB role has no UPDATE or DELETE on the audit table | P1 | Grant check shows none | T23 | AU-02 | none | V7, V14 |
@@ -92,11 +92,11 @@ Evidence for every objective is stored under `evidence/<tag>/<test-id>/`. Test I
 | SO-25 | SQL injection payloads in any path, query or body field have no effect and return a clean error | P0 | No data change or error leak; code review confirms parameterised queries | T26 | IN-01 | `request.invalid` | V5, API8 |
 | SO-26 | Unknown JSON fields, malformed JSON and bodies over 16 KB are rejected with 400 or 413 | P1 | All three rejected with the standard error body (codes agreed, gap G3) | T27 | IN-02, IN-03, IN-04 | `request.invalid` | V5, API3, API4 |
 | SO-27 | Error responses follow `{code, message, requestId}` and never expose stack traces, SQL or framework details | P1 | Every sampled error matches the schema | T29 | IL-01 | `request.invalid` | V7, API8 |
-| SO-28 | No debug or actuator endpoints are exposed, and `/openapi.json` reveals no internal or sensitive detail | P1 | All probes return 404 or 401; spec reviewed | T30 | IL-02 | none | V14, API8 |
+| SO-28 | No debug or actuator endpoints are exposed, `/swagger-ui` is disabled, and `/openapi.json` is reviewed and accepted as the public contract | P1 | `/swagger-ui` returns 404, `/openapi.json` remains public by team decision, and no internals are disclosed | T30 | IL-02 | none | V14, API8 |
 | SO-29 | Pagination enforces a default of 50 and a maximum of 100, and rejects malformed cursors | P2 | Out-of-range limits clamped or rejected; bad cursor returns 400 | T34 | PG-01 | `request.invalid` | API4 |
 | SO-30 | The PWA renders user-controlled text without executing it, and a CSP is set | P1 | No unsafe HTML sinks; stored XSS payload shown as text; CSP header present | T31 | FE-01 | none | V5 |
 | SO-31 | Tokens are not in `localStorage` unless a documented exception exists, and the service worker never caches authenticated `/api` responses | P1 | Storage and Cache Storage inspected before and after logout | T32 | FE-02, FE-03 | none | V3 |
-| SO-32 | CORS uses an explicit origin allowlist, and security headers are present | P2 | CSP, HSTS, `X-Content-Type-Options`, `X-Frame-Options` present; no wildcard CORS with credentials | T33 | FE-04 | none | V14 |
+| SO-32 | Security headers are present and the app is same-origin only; no CORS configuration is present | P2 | CSP includes `frame-ancestors 'none'`, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Cache-Control: no-store`; no wildcard CORS or app-level HSTS | T33 | FE-04 | none | V14 |
 
 ### 4.6 Build and release
 
@@ -168,3 +168,4 @@ Physical security, host OS hardening, network-layer DDoS, and third-party paymen
 |---|---|---|---|
 | 0.1 | 12 Oct 2026 | Security Lead | Initial objectives (SO-01 to SO-36) |
 | 1.0 | 12 Oct 2026 | Security Lead | Merged the two drafts; added success criteria, events and ASVS or OWASP references; added SO-37 to SO-44 for staff scope, fraud mapping, pending funds, deadlock, queue flood, collusion detection, UTC window and log persistence; SO-15 reworded to match the endpoint contract |
+| 1.1 | 13 Oct 2026 | Security Lead | Corrected SO-20's required assertion count to 35 and aligned the logging requirements with the current JengaSec contract |

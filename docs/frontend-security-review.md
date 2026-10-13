@@ -17,7 +17,7 @@ Reviewer: ________  Tag: ________  Date (UTC): ________
 | FE-01 | No unsafe HTML sinks; CSP present; XSS payload renders as text | grep for innerHTML/bypassSecurityTrust; response headers | SO-30 | T31 | | |
 | FE-02 | Token storage location understood and justified (not `localStorage`; in-memory only) | Inspect storage in dev tools | SO-31 | T32 | | |
 | FE-03 | Service worker never caches authenticated `/api` responses | Check VitePWA config (denylist /api, /healthz, /readyz, /openapi.json); go offline after login | SO-31 | T32 | | |
-| FE-04 | CORS uses an explicit origin allowlist; security headers present (CSP, HSTS, `X-Content-Type-Options`, `X-Frame-Options` or `frame-ancestors`); `Cache-Control: no-store` on authenticated responses | Response headers on API and PWA | SO-32 | T33 | | |
+| FE-04 | No app-level CORS configuration; same-origin requests only; security headers present (`Content-Security-Policy: frame-ancestors 'none'`, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Cache-Control: no-store`); TLS is terminated before the app so HSTS is not enforced at application level | Response headers on API and PWA | SO-32 | T33 | | |
 | FE-05 | Cached data cleared on logout | Logout, inspect Cache Storage | SO-31 | T32 | | |
 | FE-06 | Logout clears tokens and in-memory state | Inspect storage and state | SO-18 | T5 | | |
 | FE-07 | Route guards are UX only; backend enforces | Call APIs directly with the wrong role | SO-13 | T8 | | |
