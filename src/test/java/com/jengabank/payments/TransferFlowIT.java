@@ -8,7 +8,11 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import java.util.UUID;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 
+@ExtendWith(OutputCaptureExtension.class)
 class TransferFlowIT extends AbstractApiIT {
 
     @Test
@@ -198,5 +202,27 @@ class TransferFlowIT extends AbstractApiIT {
                 {"fromAccountId":"%s","toAccountNumber":"%s","amountMinor":1,"currency":"KES","reference":""}
                 """.formatted(UUID.randomUUID(), bob.accountNumber()))
                 .andExpect(status().isForbidden());
+    }
+
+    @Test
+    void rejectedRequestEventsNameTheUser(CapturedOutput output) throws Exception {
+        Customer alice = newCustomer(1_000_000);
+        Customer bob = newCustomer(0);
+        String makerName = createUser("MAKER", UUID.randomUUID());
+
+        transfer(alice, bob, -5).andExpect(status().isBadRequest());
+        postJson("/api/v1/transfers", login(makerName), """
+                {"fromAccountId":"%s","toAccountNumber":"%s","amountMinor":1,"currency":"KES","reference":""}
+                """.formatted(UUID.randomUUID(), bob.accountNumber()))
+                .andExpect(status().isForbidden());
+
+        assertThat(securityLine(output, "transfer.invalid_amount", alice.username())).isTrue();
+        assertThat(securityLine(output, "authz.access.denied", makerName)).isTrue();
+    }
+
+    private static boolean securityLine(CapturedOutput output, String action, String username) {
+        return output.getOut().lines().anyMatch(l -> l.contains("\"logger_name\":\"security\"")
+                && l.contains("\"action\":\"" + action + "\"")
+                && l.contains("\"username\":\"" + username + "\""));
     }
 }

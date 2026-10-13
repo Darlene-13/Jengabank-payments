@@ -1,14 +1,10 @@
 package com.jengabank.payments.config;
 
-import static net.logstash.logback.argument.StructuredArguments.kv;
-
 import java.io.IOException;
 import java.util.List;
 
 import jakarta.servlet.http.HttpServletResponse;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -39,8 +35,6 @@ import com.jengabank.payments.logging.SecurityEventLogger;
 @EnableWebSecurity
 @EnableMethodSecurity
 public class SecurityConfig {
-
-    private static final Logger log = LoggerFactory.getLogger("security");
 
     private static final String CSP = "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
             + "script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
@@ -105,8 +99,8 @@ public class SecurityConfig {
                 .authenticationEntryPoint((req, res, ex) ->
                         write(res, HttpServletResponse.SC_UNAUTHORIZED, "UNAUTHENTICATED", "Sign in to continue."))
                 .accessDeniedHandler((req, res, ex) -> {
-                    log.warn("access denied", kv("action", Actions.AUTHZ_ACCESS_DENIED),
-                            kv("path", req.getRequestURI()), kv("src_ip", clientIp.resolve(req)));
+                    events.warn(Actions.AUTHZ_ACCESS_DENIED, "reason", "role",
+                            "path", req.getRequestURI(), "src_ip", clientIp.resolve(req));
                     write(res, HttpServletResponse.SC_FORBIDDEN, "FORBIDDEN", "Your role can't do this.");
                 }))
             .addFilterBefore(new TokenAuthFilter(sessions, events, clientIp), UsernamePasswordAuthenticationFilter.class);

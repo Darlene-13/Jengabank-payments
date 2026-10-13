@@ -17,6 +17,8 @@ import org.springframework.web.context.request.RequestContextHolder;
  * Never pass passwords, tokens or full account details.
  * The most severe action of a request (latest wins on a tie) also goes on that request's
  * http line, so a reader of RequestLogFilter's line sees what happened without a join.
+ * Events raised inside an authenticated request get that request's username when the caller
+ * didn't pass one, so every event can be grouped by user without a requestId join.
  */
 @Component
 public class SecurityEventLogger {
@@ -64,6 +66,18 @@ public class SecurityEventLogger {
             }
             map.put(String.valueOf(keyValues[i]), value);
         }
+        if (!map.containsKey("username")) {
+            Object user = requestUser();
+            if (user != null) {
+                map.put("username", user);
+            }
+        }
         return map;
+    }
+
+    private static Object requestUser() {
+        RequestAttributes request = RequestContextHolder.getRequestAttributes();
+        return request == null ? null
+                : request.getAttribute(RequestLogFilter.USER_ATTRIBUTE, RequestAttributes.SCOPE_REQUEST);
     }
 }

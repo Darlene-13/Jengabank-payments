@@ -1,4 +1,4 @@
-
+# syntax=docker/dockerfile:1
 # ---------- 1. Frontend (React) ----------
 FROM --platform=$BUILDPLATFORM node:22-slim AS web
 WORKDIR /web
@@ -11,15 +11,16 @@ RUN npm run build
 FROM --platform=$BUILDPLATFORM maven:3.9-eclipse-temurin-21 AS build
 WORKDIR /src
 COPY pom.xml ./
-RUN mvn -B -q dependency:go-offline
+# The cache mount keeps ~/.m2 between builds, so a pom change doesn't re-download everything.
+RUN --mount=type=cache,target=/root/.m2 mvn -B -q dependency:go-offline
 COPY src ./src
 COPY --from=web /web/dist/ ./src/main/resources/static/
 # Tests run in CI; the image build stays fast and deterministic.
-RUN mvn -B -q package -DskipTests \
+RUN --mount=type=cache,target=/root/.m2 mvn -B -q package -DskipTests \
  && find target -maxdepth 1 -name '*.jar' ! -name '*-plain.jar' ! -name '*.original' -exec cp {} /src/app.jar \;
 
 # ---------- 3. Runtime ----------
-FROM --platform=linux/amd64 eclipse-temurin:21-jre-alpine AS runtime
+FROM --platform=$TARGETPLATFORM eclipse-temurin:21-jre-alpine AS runtime
 RUN apk upgrade --no-cache \
  && addgroup -S -g 10001 app \
  && adduser  -S -u 10001 -G app -H -s /sbin/nologin app
