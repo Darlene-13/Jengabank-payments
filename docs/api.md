@@ -330,18 +330,23 @@ The customer never supplies who they are, a status, or a fee. Identity comes fro
 
 **What happens, all in one database transaction:**
 
-```
-claim idempotency key
-  → lock customer row         (serialises this customer's transfers: daily total and velocity can't be raced)
-  → check source and destination
-  → lock both accounts in id order   (no deadlocks, however transfers interleave)
-  → limits     ─ breach ──────────────► BLOCKED row recorded, 422
-  → balance    ─ short ───────────────► 422 INSUFFICIENT_FUNDS (nothing recorded)
-  → fraud      ─ BLOCK ───────────────► BLOCKED row recorded, 422
-               ─ REVIEW, or amount ≥ KES 250,000 ► PENDING_APPROVAL, 202, no money moves
-               ─ ALLOW and under threshold ─────► journal posted, COMPLETED, 201
-  → audit record (hash-chained) and security log event
-commit       (the database re-checks: journal balanced, no overdraft)
+```mermaid
+flowchart TD
+    A[Claim idempotency key] --> B["Lock customer row<br/>(daily total and velocity can't be raced)"]
+    B --> C[Check source and destination]
+    C --> D["Lock both accounts in id order<br/>(no deadlocks)"]
+    D --> E{Within limits?}
+    E -- no --> X1["BLOCKED row recorded<br/>422 TRANSFER_BLOCKED"]
+    E -- yes --> F{Enough balance?}
+    F -- no --> X2["422 INSUFFICIENT_FUNDS<br/>(refusal audited)"]
+    F -- yes --> G{Fraud decision}
+    G -- BLOCK --> X1
+    G -- "REVIEW, or amount >= KES 250,000" --> P["PENDING_APPROVAL<br/>202, no money moves"]
+    G -- "ALLOW, under threshold" --> OK["Journal posted, COMPLETED<br/>201"]
+    P --> Z[Audit record and security log event]
+    OK --> Z
+    X1 --> Z
+    Z --> COMMIT["Commit: the database re-checks<br/>balanced journal and no overdraft"]
 ```
 
 **Responses**
@@ -590,25 +595,31 @@ Run results are append-only, with the same trigger protection as the audit log. 
 
 ### Transfer
 
-```
-                ┌──────────────┐
-   create ─────►│  COMPLETED   │──── reversal posted ───►  REVERSED
-     │          └──────────────┘
-     │                 ▲ approve (different CHECKER, balance re-checked)
-     │          ┌──────┴───────────┐
-     ├─────────►│ PENDING_APPROVAL │──── reject ───►  REJECTED
-     │          └──────────────────┘
-     └─────────► BLOCKED   (limit or fraud; terminal)
+```mermaid
+stateDiagram-v2
+    [*] --> COMPLETED: create (ALLOW, under threshold)
+    [*] --> PENDING_APPROVAL: create (REVIEW, or >= KES 250,000)
+    [*] --> BLOCKED: create (limit or fraud)
+    PENDING_APPROVAL --> COMPLETED: approve (different CHECKER, balance re-checked)
+    PENDING_APPROVAL --> REJECTED: reject
+    COMPLETED --> REVERSED: reversal posted
+    BLOCKED --> [*]
+    REJECTED --> [*]
+    REVERSED --> [*]
 ```
 
-A database trigger allows **only** these moves: `PENDING_APPROVAL → COMPLETED | REJECTED` and `COMPLETED → REVERSED`. Core fields (parties, amount, creator, fraud decision) can never change, and transfers can never be deleted.
+A database trigger allows **only** these moves: `PENDING_APPROVAL -> COMPLETED | REJECTED` and `COMPLETED -> REVERSED`. Core fields (parties, amount, creator, fraud decision) can never change, and transfers can never be deleted.
 
 ### Reversal
 
-```
- request ─┬─ < KES 250k ──────────────────────────►  POSTED
-          └─ ≥ KES 250k ─► PENDING_APPROVAL ─┬─ approve ─►  POSTED
-                                             └─ reject ──►  REJECTED
+```mermaid
+stateDiagram-v2
+    [*] --> POSTED: request (under KES 250,000)
+    [*] --> PENDING_APPROVAL: request (KES 250,000 or more)
+    PENDING_APPROVAL --> POSTED: approve (CHECKER who is not the requester)
+    PENDING_APPROVAL --> REJECTED: reject
+    POSTED --> [*]
+    REJECTED --> [*]
 ```
 Only `PENDING_APPROVAL` can change, and reversals can never be deleted.
 
@@ -621,7 +632,7 @@ These are the guarantees we claim, and how each one is enforced.
 | # | Guarantee | Application | Database (backstop) | Proven by |
 |---|-----------|-------------|---------------------|-----------|
 | 1 | No overspend, even under concurrency | Customer row lock, then account locks in id order, then balance check | Deferred trigger: no `allow_negative = false` account below zero at commit | `TransferConcurrencyIT`: 20 parallel KES 10,000 transfers against KES 96,000; exactly 9 succeed |
-| 2 | Every journal balances | `LedgerService.post` refuses unbalanced lines | Deferred trigger: Σ debits = Σ credits per journal | `LedgerIntegrityIT` |
+| 2 | Every journal balances | `LedgerService.post` refuses unbalanced lines | Deferred trigger: sum of debits = sum of credits per journal | `LedgerIntegrityIT` |
 | 3 | The whole ledger nets to zero | Double entry only | Reconciliation check | `TransferConcurrencyIT`, reconciliation |
 | 4 | History is immutable | No update or delete code paths | Triggers block `UPDATE`/`DELETE`/`TRUNCATE` on journals, entries, audit and reconciliation runs | `LedgerIntegrityIT` |
 | 5 | Exactly-once money movement | `IdempotencyService` in the same transaction | `PRIMARY KEY (user_id, idem_key)` | `TransferConcurrencyIT.sameIdempotencyKeyPostsExactlyOnce` |
@@ -713,29 +724,29 @@ CHK=$(login ops.checker "$CHECKER_PW")
 FROM=$(curl -s $API/accounts -H "Authorization: Bearer $CUST" | jq -r '.items[0].id')
 TO=<otieno's account number>
 
-# 1. Small transfer → 201 COMPLETED
+# 1. Small transfer -> 201 COMPLETED
 curl -s $API/transfers -H "Authorization: Bearer $CUST" -H "Idempotency-Key: $(key)" \
   -H 'Content-Type: application/json' \
   -d "{\"fromAccountId\":\"$FROM\",\"toAccountNumber\":\"$TO\",\"amountMinor\":500000,\"currency\":\"KES\",\"reference\":\"Lunch\"}" | jq .status
 
-# 2. Replay the same key → identical response, no double debit
+# 2. Replay the same key -> identical response, no double debit
 K=$(key)
 for i in 1 2; do curl -s $API/transfers -H "Authorization: Bearer $CUST" -H "Idempotency-Key: $K" \
   -H 'Content-Type: application/json' \
   -d "{\"fromAccountId\":\"$FROM\",\"toAccountNumber\":\"$TO\",\"amountMinor\":100000,\"currency\":\"KES\"}" | jq -c '{id,status}'; done
 
-# 3. Large transfer → 202 PENDING_APPROVAL, then a checker approves
+# 3. Large transfer -> 202 PENDING_APPROVAL, then a checker approves
 T=$(curl -s $API/transfers -H "Authorization: Bearer $CUST" -H "Idempotency-Key: $(key)" \
   -H 'Content-Type: application/json' \
   -d "{\"fromAccountId\":\"$FROM\",\"toAccountNumber\":\"$TO\",\"amountMinor\":30000000,\"currency\":\"KES\"}" | jq -r .id)
 curl -s -X POST $API/approvals/$T/approve -H "Authorization: Bearer $CHK" -H "Idempotency-Key: $(key)" | jq .status
 
-# 4. Maker requests a reversal → 202, so a checker must approve it
+# 4. Maker requests a reversal -> 202, so a checker must approve it
 R=$(curl -s $API/transfers/$T/reversals -H "Authorization: Bearer $MAKER" -H "Idempotency-Key: $(key)" \
   -H 'Content-Type: application/json' -d '{"reason":"Customer paid the wrong account"}' | jq -r .id)
 curl -s -X POST $API/reversals/$R/approve -H "Authorization: Bearer $CHK" -H "Idempotency-Key: $(key)" | jq .status
 
-# 5. Customer tries a staff endpoint → 403
+# 5. Customer tries a staff endpoint -> 403
 curl -s -o /dev/null -w '%{http_code}\n' $API/approvals -H "Authorization: Bearer $CUST"
 
 # 6. Prove the audit chain is intact
