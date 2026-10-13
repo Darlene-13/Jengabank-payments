@@ -8,9 +8,13 @@ import org.springframework.web.bind.annotation.RestController;
 import com.jengabank.payments.audit.AuditDtos.AuditRecordDto;
 import com.jengabank.payments.audit.AuditDtos.AuditVerification;
 import com.jengabank.payments.auth.CurrentUser;
+
 import com.jengabank.payments.common.Page;
 
+import io.swagger.v3.oas.annotations.tags.Tag;
+
 /** MAKER and CHECKER only (SecurityConfig). */
+@Tag(name = "Audit")
 @RestController
 @RequestMapping("/api/v1/audit")
 public class AuditController {

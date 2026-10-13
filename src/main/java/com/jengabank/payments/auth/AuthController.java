@@ -14,8 +14,13 @@ import com.jengabank.payments.auth.AuthDtos.LoginRequest;
 import com.jengabank.payments.auth.AuthDtos.LoginResponse;
 import com.jengabank.payments.auth.AuthDtos.MeResponse;
 import com.jengabank.payments.logging.ClientIpResolver;
+
 import com.jengabank.payments.logging.RequestLogFilter;
 
+import io.swagger.v3.oas.annotations.security.SecurityRequirements;
+import io.swagger.v3.oas.annotations.tags.Tag;
+
+@Tag(name = "Auth")
 @RestController
 @RequestMapping("/api/v1")
 public class AuthController {
@@ -28,6 +33,7 @@ public class AuthController {
         this.clientIp = clientIp;
     }
 
+    @SecurityRequirements
     @PostMapping("/auth/login")
     public LoginResponse login(@Valid @RequestBody LoginRequest body, HttpServletRequest request) {
         LoginResponse response = auth.login(body.username(), body.password(), clientIp.resolve(request));

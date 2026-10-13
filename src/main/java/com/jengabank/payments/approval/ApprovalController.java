@@ -24,9 +24,13 @@ import com.jengabank.payments.error.BusinessException;
 import com.jengabank.payments.logging.Actions;
 import com.jengabank.payments.logging.RateLimiter;
 import com.jengabank.payments.logging.SecurityEventLogger;
+
 import com.jengabank.payments.transfer.TransferDtos.TransferDto;
 
+import io.swagger.v3.oas.annotations.tags.Tag;
+
 /** Transfer approvals only. Reversal approvals live at /api/v1/reversals/{id}/approve|reject. */
+@Tag(name = "Approvals")
 @RestController
 @RequestMapping("/api/v1/approvals")
 @PreAuthorize("hasRole('CHECKER')")

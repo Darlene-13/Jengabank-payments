@@ -11,8 +11,12 @@ import org.springframework.web.bind.annotation.RestController;
 import com.jengabank.payments.account.AccountDtos.AccountDto;
 import com.jengabank.payments.account.AccountDtos.LedgerEntryDto;
 import com.jengabank.payments.auth.CurrentUser;
+
 import com.jengabank.payments.common.Page;
 
+import io.swagger.v3.oas.annotations.tags.Tag;
+
+@Tag(name = "Accounts")
 @RestController
 @RequestMapping("/api/v1/accounts")
 public class AccountController {

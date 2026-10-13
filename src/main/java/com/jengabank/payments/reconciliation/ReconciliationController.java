@@ -7,9 +7,13 @@ import org.springframework.web.bind.annotation.RestController;
 
 import com.jengabank.payments.auth.AuthenticatedUser;
 import com.jengabank.payments.auth.CurrentUser;
+
 import com.jengabank.payments.error.BusinessException;
 
+import io.swagger.v3.oas.annotations.tags.Tag;
+
 /** POST: CHECKER. GET: MAKER, CHECKER (SecurityConfig). */
+@Tag(name = "Reconciliation")
 @RestController
 @RequestMapping("/api/v1/reconciliation/runs")
 public class ReconciliationController {

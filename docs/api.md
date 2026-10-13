@@ -34,7 +34,7 @@ curl -s localhost:8080/healthz          # {"status":"UP"}
 curl -s localhost:8080/readyz           # {"status":"READY"} once Flyway has migrated
 ```
 
-Seeded users (passwords are in `SETUP.md`):
+Seeded users (passwords are shared in the team chat, never in the repo):
 
 | Username       | Role     | Use it to                                      |
 |----------------|----------|------------------------------------------------|

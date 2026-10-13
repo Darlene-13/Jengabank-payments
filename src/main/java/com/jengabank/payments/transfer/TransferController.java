@@ -25,8 +25,12 @@ import com.jengabank.payments.logging.Actions;
 import com.jengabank.payments.logging.RateLimiter;
 import com.jengabank.payments.logging.SecurityEventLogger;
 import com.jengabank.payments.transfer.TransferDtos.CreateTransferRequest;
+
 import com.jengabank.payments.transfer.TransferDtos.TransferDto;
 
+import io.swagger.v3.oas.annotations.tags.Tag;
+
+@Tag(name = "Transfers")
 @RestController
 @RequestMapping("/api/v1/transfers")
 public class TransferController {

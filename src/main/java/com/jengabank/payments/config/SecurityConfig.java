@@ -46,7 +46,8 @@ public class SecurityConfig {
             + "script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
 
     private static final String[] PUBLIC_GET = {
-            "/healthz", "/readyz", "/openapi.json",
+            "/healthz", "/readyz", "/openapi.json", "/openapi.json/swagger-config",
+            "/swagger-ui.html", "/swagger-ui/**",
             "/", "/index.html", "/assets/**", "/icons/**", "/favicon.ico",
             "/manifest.webmanifest", "/sw.js", "/workbox-*.js", "/registerSW.js",
             "/login", "/send", "/transfers", "/transfers/*", "/accounts/*", "/staff/**"
