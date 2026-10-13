@@ -30,7 +30,6 @@ import org.springframework.web.filter.OncePerRequestFilter;
 @Order(Ordered.HIGHEST_PRECEDENCE)
 public class RequestLogFilter extends OncePerRequestFilter {
 
-    /** Dev 2: the token filter must set this attribute to the username once authenticated. */
     public static final String USER_ATTRIBUTE = "jb.username";
     /** Set by SecurityEventLogger. */
     public static final String ACTION_ATTRIBUTE = "jb.action";
