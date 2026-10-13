@@ -1,5 +1,6 @@
 package com.jengabank.payments;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -176,5 +177,27 @@ class AuthAndAccountsIT {
                 .andExpect(status().isForbidden());
         mvc.perform(get("/api/v1/audit").header("Authorization", "Bearer " + token))
                 .andExpect(status().isForbidden());
+    }
+
+    @Test
+    void bodyOver16kIsRejectedBeforeItsEvenParsed() throws Exception {
+        String oversized = loginBody("x", "y".repeat(20_000));
+        mvc.perform(post("/api/v1/auth/login").contentType(MediaType.APPLICATION_JSON).content(oversized))
+                .andExpect(status().isPayloadTooLarge())
+                .andExpect(jsonPath("$.code").value("PAYLOAD_TOO_LARGE"));
+    }
+
+    @Test
+    void spoofedForwardedForDoesNotChangeTheIpUsedForRateLimiting() throws Exception {
+        // No jengabank.security.trusted-proxies configured here, so this header must be ignored:
+        // the row the rate limiter writes should key on MockMvc's real test client address, not
+        // the one an attacker claims in the header.
+        mvc.perform(post("/api/v1/auth/login").contentType(MediaType.APPLICATION_JSON)
+                        .header("X-Forwarded-For", "203.0.113.1")
+                        .content(loginBody("nobody.here", "x")));
+
+        String ip = jdbc.queryForObject(
+                "SELECT ip_address FROM login_rate_limits ORDER BY window_start DESC LIMIT 1", String.class);
+        assertThat(ip).isNotEqualTo("203.0.113.1");
     }
 }
