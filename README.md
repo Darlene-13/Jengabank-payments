@@ -230,9 +230,9 @@ The build is three stages: React build, Maven build, then a slim JRE runtime. Ma
 | Role | Name | Owned |
 |------|------|-------|
 | Build Lead | Darlene Wendy | Schema and migrations, double-entry ledger, atomic transfers, idempotency, reversals, frontend, Docker and CI, code review |
-| Developer, Identity and Visibility | Christopher Mbuthia | Login, sessions and tokens, lockout, roles, account endpoints, structured request and security logging |
+| Developer, Identity and Visibility | Phenny Mwaisaka | Login, sessions and tokens, lockout, roles, account endpoints, structured request and security logging |
 | Developer, Transaction Controls | Lucy Njenga | Limits, fraud engine (including the round-trip rule), maker-checker approvals, audit trail endpoints, end-of-day reconciliation |
-| Security Lead | Phenny Mwaisaka | Threat model, security objectives, attacking every release, frontend security review, live defence coordination |
+| Security Lead | Christopher Mbuthia | Threat model, security objectives, attacking every release, frontend security review, live defence coordination |
 
 ---
 
