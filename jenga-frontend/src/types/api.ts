@@ -96,6 +96,23 @@ export interface ReversalRequest {
   reason: string;
 }
 
+export type ReversalStatus = "PENDING_APPROVAL" | "POSTED" | "REJECTED";
+
+export interface Reversal {
+  id: string;
+  transferId: string;
+  status: ReversalStatus;
+  reason: string;
+  amountMinor: number;
+  fromAccountNumber: string;
+  toAccountNumber: string;
+  journalId: string | null;
+  requestedBy: string;
+  requestedAt: string;
+  decidedBy: string | null;
+  decidedAt: string | null;
+}
+
 export interface RejectRequest {
   reason: string;
 }

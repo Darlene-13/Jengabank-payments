@@ -14,29 +14,37 @@ import com.jengabank.payments.reversal.ReversalDtos.ReversalDto;
 @Repository
 public class ReversalRepository {
 
-    /** The columns the money path needs. */
-    public record Row(UUID id, UUID transferId, String status, UUID requestedBy, String requestedByUsername, String reason) {}
+    public record TransferForReversal(UUID id, UUID fromAccountId, UUID toAccountId, long amountMinor,
+                                      String status, UUID journalId, String reference) {}
 
-    private static final String DTO_SELECT = """
-            SELECT r.id, r.transfer_id, fa.account_number AS from_number, ta.account_number AS to_number,
-                   t.amount_minor, r.reason, r.status, u.username, r.requested_at
+    public record ReversalRow(UUID id, UUID transferId, String status, UUID requestedBy) {}
+
+    private static final String SELECT_DTO = """
+            SELECT r.id, r.transfer_id, r.status, r.reason, t.amount_minor,
+                   fa.account_number AS from_number, ta.account_number AS to_number,
+                   r.journal_id, ru.username AS requested_by, r.requested_at,
+                   du.username AS decided_by, r.decided_at
               FROM reversals r
               JOIN transfers t ON t.id = r.transfer_id
               JOIN accounts fa ON fa.id = t.from_account_id
               JOIN accounts ta ON ta.id = t.to_account_id
-              JOIN users u ON u.id = r.requested_by
+              JOIN users ru ON ru.id = r.requested_by
+              LEFT JOIN users du ON du.id = r.decided_by
             """;
 
     private static final RowMapper<ReversalDto> DTO = (rs, n) -> new ReversalDto(
             rs.getObject("id", UUID.class),
             rs.getObject("transfer_id", UUID.class),
+            rs.getString("status"),
+            rs.getString("reason"),
+            rs.getLong("amount_minor"),
             rs.getString("from_number"),
             rs.getString("to_number"),
-            rs.getLong("amount_minor"),
-            rs.getString("reason"),
-            rs.getString("status"),
-            rs.getString("username"),
-            rs.getObject("requested_at", OffsetDateTime.class));
+            rs.getObject("journal_id", UUID.class),
+            rs.getString("requested_by"),
+            rs.getObject("requested_at", OffsetDateTime.class),
+            rs.getString("decided_by"),
+            rs.getObject("decided_at", OffsetDateTime.class));
 
     private final JdbcTemplate jdbc;
 
@@ -44,65 +52,77 @@ public class ReversalRepository {
         this.jdbc = jdbc;
     }
 
-    /** Pending or posted. The uq_reversal_live index allows at most one per transfer. */
-    public boolean hasLive(UUID transferId) {
-        return Boolean.TRUE.equals(jdbc.queryForObject(
-                "SELECT EXISTS (SELECT 1 FROM reversals WHERE transfer_id = ? AND status <> 'REJECTED')",
-                Boolean.class, transferId));
-    }
-
-    public UUID insertPosted(UUID transferId, String reason, UUID journalId, UUID requestedBy) {
-        return jdbc.queryForObject("""
-                INSERT INTO reversals (transfer_id, reason, status, journal_id, requested_by)
-                VALUES (?, ?, 'POSTED', ?, ?) RETURNING id
-                """, UUID.class, transferId, reason, journalId, requestedBy);
-    }
-
-    public UUID insertPending(UUID transferId, String reason, UUID requestedBy) {
-        return jdbc.queryForObject("""
-                INSERT INTO reversals (transfer_id, reason, status, requested_by)
-                VALUES (?, ?, 'PENDING_APPROVAL', ?) RETURNING id
-                """, UUID.class, transferId, reason, requestedBy);
-    }
-
-    public Optional<Row> findForUpdate(UUID id) {
+    public Optional<TransferForReversal> lockTransfer(UUID transferId) {
         return jdbc.query("""
-                SELECT r.id, r.transfer_id, r.status, r.requested_by, u.username, r.reason
-                  FROM reversals r JOIN users u ON u.id = r.requested_by
-                 WHERE r.id = ? FOR UPDATE OF r
-                """,
-                (rs, n) -> new Row(rs.getObject("id", UUID.class), rs.getObject("transfer_id", UUID.class),
-                        rs.getString("status"), rs.getObject("requested_by", UUID.class),
-                        rs.getString("username"), rs.getString("reason")),
+                SELECT id, from_account_id, to_account_id, amount_minor, status, journal_id, reference
+                  FROM transfers WHERE id = ? FOR UPDATE""",
+                (rs, n) -> new TransferForReversal(
+                        rs.getObject("id", UUID.class),
+                        rs.getObject("from_account_id", UUID.class),
+                        rs.getObject("to_account_id", UUID.class),
+                        rs.getLong("amount_minor"),
+                        rs.getString("status"),
+                        rs.getObject("journal_id", UUID.class),
+                        rs.getString("reference")),
+                transferId).stream().findFirst();
+    }
+
+    public boolean hasLiveReversal(UUID transferId) {
+        Boolean exists = jdbc.queryForObject(
+                "SELECT EXISTS (SELECT 1 FROM reversals WHERE transfer_id = ? AND status <> 'REJECTED')",
+                Boolean.class, transferId);
+        return Boolean.TRUE.equals(exists);
+    }
+
+    public void insert(UUID id, UUID transferId, String reason, String status, UUID journalId, UUID requestedBy) {
+        jdbc.update("""
+                INSERT INTO reversals (id, transfer_id, reason, status, journal_id, requested_by)
+                VALUES (?, ?, ?, ?, ?, ?)""", id, transferId, reason, status, journalId, requestedBy);
+    }
+
+    public Optional<ReversalRow> lockReversal(UUID id) {
+        return jdbc.query("SELECT id, transfer_id, status, requested_by FROM reversals WHERE id = ? FOR UPDATE",
+                (rs, n) -> new ReversalRow(
+                        rs.getObject("id", UUID.class),
+                        rs.getObject("transfer_id", UUID.class),
+                        rs.getString("status"),
+                        rs.getObject("requested_by", UUID.class)),
                 id).stream().findFirst();
     }
 
-    public void markPosted(UUID id, UUID journalId, UUID checkerId) {
-        jdbc.update("""
+    public int markPosted(UUID id, UUID journalId, UUID decidedBy) {
+        return jdbc.update("""
                 UPDATE reversals SET status = 'POSTED', journal_id = ?, decided_by = ?, decided_at = now()
-                 WHERE id = ? AND status = 'PENDING_APPROVAL'
-                """, journalId, checkerId, id);
+                 WHERE id = ? AND status = 'PENDING_APPROVAL'""", journalId, decidedBy, id);
     }
 
-    public void markRejected(UUID id, UUID checkerId) {
-        jdbc.update("""
+    public int markRejected(UUID id, UUID decidedBy) {
+        return jdbc.update("""
                 UPDATE reversals SET status = 'REJECTED', decided_by = ?, decided_at = now()
-                 WHERE id = ? AND status = 'PENDING_APPROVAL'
-                """, checkerId, id);
+                 WHERE id = ? AND status = 'PENDING_APPROVAL'""", decidedBy, id);
     }
 
-    public ReversalDto dto(UUID id) {
-        return jdbc.queryForObject(DTO_SELECT + " WHERE r.id = ?", DTO, id);
+    public int markTransferReversed(UUID transferId, UUID reversalJournalId) {
+        return jdbc.update("""
+                UPDATE transfers SET status = 'REVERSED', reversal_journal_id = ?
+                 WHERE id = ? AND status = 'COMPLETED'""", reversalJournalId, transferId);
     }
 
-    /** Oldest first, so the queue is worked in order. Cursor = (requested_at, id). */
-    public List<ReversalDto> pending(OffsetDateTime afterTs, UUID afterId, int limit) {
-        if (afterTs == null) {
-            return jdbc.query(DTO_SELECT + " WHERE r.status = 'PENDING_APPROVAL' ORDER BY r.requested_at, r.id LIMIT ?",
-                    DTO, limit);
+    public Optional<ReversalDto> find(UUID id) {
+        return jdbc.query(SELECT_DTO + " WHERE r.id = ?", DTO, id).stream().findFirst();
+    }
+
+    public List<ReversalDto> list(String status, OffsetDateTime beforeTs, UUID beforeId, int limit) {
+        String where = status == null ? " WHERE TRUE" : " WHERE r.status = ?";
+        String order = " ORDER BY r.requested_at DESC, r.id DESC LIMIT ?";
+        if (beforeTs == null) {
+            return status == null
+                    ? jdbc.query(SELECT_DTO + where + order, DTO, limit)
+                    : jdbc.query(SELECT_DTO + where + order, DTO, status, limit);
         }
-        return jdbc.query(DTO_SELECT + """
-                 WHERE r.status = 'PENDING_APPROVAL' AND (r.requested_at, r.id) > (?, ?)
-                 ORDER BY r.requested_at, r.id LIMIT ?""", DTO, afterTs, afterId, limit);
+        String keyset = " AND (r.requested_at, r.id) < (?, ?)";
+        return status == null
+                ? jdbc.query(SELECT_DTO + where + keyset + order, DTO, beforeTs, beforeId, limit)
+                : jdbc.query(SELECT_DTO + where + keyset + order, DTO, status, beforeTs, beforeId, limit);
     }
 }

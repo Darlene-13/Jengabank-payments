@@ -4,103 +4,161 @@ import java.time.OffsetDateTime;
 import java.time.format.DateTimeParseException;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import com.jengabank.payments.audit.AuditService;
-import com.jengabank.payments.audit.RefusalException;
+import com.jengabank.payments.audit.AuditWriter;
 import com.jengabank.payments.auth.AuthenticatedUser;
 import com.jengabank.payments.common.Cursors;
 import com.jengabank.payments.common.Page;
-import com.jengabank.payments.config.JengaProperties;
 import com.jengabank.payments.error.BusinessException;
 import com.jengabank.payments.idempotency.IdempotencyService;
-import com.jengabank.payments.ledger.LedgerRepository;
 import com.jengabank.payments.ledger.LedgerService;
+import com.jengabank.payments.ledger.LedgerService.Direction;
+import com.jengabank.payments.ledger.LedgerService.Line;
 import com.jengabank.payments.logging.Actions;
 import com.jengabank.payments.logging.SecurityEventLogger;
+import com.jengabank.payments.reversal.ReversalDtos.RejectRequest;
 import com.jengabank.payments.reversal.ReversalDtos.ReversalDto;
-import com.jengabank.payments.transfer.Transfer;
-import com.jengabank.payments.transfer.TransferDtos.TransferDto;
-import com.jengabank.payments.transfer.TransferRepository;
-import com.jengabank.payments.transfer.TransferStatus;
+import com.jengabank.payments.reversal.ReversalDtos.ReversalRequest;
+import com.jengabank.payments.reversal.ReversalRepository.ReversalRow;
+import com.jengabank.payments.reversal.ReversalRepository.TransferForReversal;
 
 /**
- * A reversal never edits the original: it posts a new journal with the entries
- * swapped. Each transfer can be reversed once (UNIQUE reversal_of in V1).
- * Reversals under the approval threshold post at once; larger ones wait for a
- * CHECKER who isn't the MAKER who asked.
+ * G5 decision: reversals under the approval threshold post immediately;
+ * at or above it they wait for a CHECKER who is not the requesting MAKER.
+ * A reversal never edits the original: it posts a new journal with the entries swapped.
  */
 @Service
 public class ReversalService {
 
-    private final ReversalRepository reversals;
-    private final TransferRepository transfers;
-    private final LedgerRepository accounts;
+    private static final Set<String> STATUSES = Set.of("PENDING_APPROVAL", "POSTED", "REJECTED");
+
+    private final ReversalRepository repo;
     private final LedgerService ledger;
     private final IdempotencyService idempotency;
-    private final AuditService audit;
+    private final AuditWriter audit;
     private final SecurityEventLogger events;
     private final long thresholdMinor;
 
-    public ReversalService(ReversalRepository reversals, TransferRepository transfers, LedgerRepository accounts,
-                           LedgerService ledger, IdempotencyService idempotency, AuditService audit,
-                           SecurityEventLogger events, JengaProperties properties) {
-        this.reversals = reversals;
-        this.transfers = transfers;
-        this.accounts = accounts;
+    public ReversalService(ReversalRepository repo, LedgerService ledger, IdempotencyService idempotency,
+                           AuditWriter audit, SecurityEventLogger events,
+                           @Value("${jengabank.approval.threshold-minor:25000000}") long thresholdMinor) {
+        this.repo = repo;
         this.ledger = ledger;
         this.idempotency = idempotency;
         this.audit = audit;
         this.events = events;
-        this.thresholdMinor = properties.approval().thresholdMinor();
+        this.thresholdMinor = thresholdMinor;
+    }
+
+    // ---- MAKER requests a reversal -------------------------------------------
+
+    @Transactional
+    public ResponseEntity<?> request(AuthenticatedUser maker, UUID transferId, ReversalRequest body, String key) {
+        String endpoint = "POST /api/v1/transfers/" + transferId + "/reversals";
+        return idempotency.execute(maker, key, endpoint, body, () -> doRequest(maker, transferId, body.reason().trim()));
+    }
+
+    private ResponseEntity<?> doRequest(AuthenticatedUser maker, UUID transferId, String reason) {
+        TransferForReversal transfer = repo.lockTransfer(transferId).orElseThrow(() -> {
+            events.warn(Actions.REVERSAL_DENIED, "username", maker.username(), "transfer_id", transferId, "reason", "not_found");
+            return BusinessException.notFound();
+        });
+
+        if (!"COMPLETED".equals(transfer.status())) {
+            events.warn(Actions.REVERSAL_DENIED, "username", maker.username(), "transfer_id", transferId,
+                    "reason", "status_" + transfer.status());
+            throw BusinessException.rule("REVERSAL_NOT_ALLOWED", "Only completed transfers can be reversed.");
+        }
+        if (repo.hasLiveReversal(transferId)) {
+            events.warn(Actions.REVERSAL_DUPLICATE_DENIED, "username", maker.username(), "transfer_id", transferId);
+            throw BusinessException.conflict("REVERSAL_EXISTS", "This transfer already has a reversal.");
+        }
+
+        UUID reversalId = UUID.randomUUID();
+        Map<String, Object> details = Map.of("transfer_id", transferId.toString(),
+                "amount_minor", transfer.amountMinor(), "reason", reason);
+
+        if (transfer.amountMinor() >= thresholdMinor) {
+            repo.insert(reversalId, transferId, reason, "PENDING_APPROVAL", null, maker.id());
+            audit.write(maker.username(), Actions.REVERSAL_PENDING_APPROVAL, "reversal/" + reversalId, details);
+            events.info(Actions.REVERSAL_PENDING_APPROVAL, "username", maker.username(),
+                    "reversal_id", reversalId, "transfer_id", transferId, "amount_minor", transfer.amountMinor());
+            return ResponseEntity.status(HttpStatus.ACCEPTED).body(repo.find(reversalId).orElseThrow());
+        }
+
+        UUID journalId = postReversal(transfer, maker.id());
+        repo.insert(reversalId, transferId, reason, "POSTED", journalId, maker.id());
+        audit.write(maker.username(), Actions.REVERSAL_CREATED, "reversal/" + reversalId, details);
+        events.info(Actions.REVERSAL_CREATED, "username", maker.username(), "reversal_id", reversalId,
+                "transfer_id", transferId, "journal_id", journalId, "amount_minor", transfer.amountMinor());
+        return ResponseEntity.status(HttpStatus.CREATED).body(repo.find(reversalId).orElseThrow());
+    }
+
+    // ---- CHECKER approves or rejects -----------------------------------------
+
+    @Transactional
+    public ResponseEntity<?> approve(AuthenticatedUser checker, UUID reversalId, String key) {
+        String endpoint = "POST /api/v1/reversals/" + reversalId + "/approve";
+        return idempotency.execute(checker, key, endpoint, Map.of(), () -> {
+            ReversalRow reversal = lockPending(checker, reversalId);
+            TransferForReversal transfer = repo.lockTransfer(reversal.transferId()).orElseThrow(BusinessException::notFound);
+            if (!"COMPLETED".equals(transfer.status())) {
+                throw BusinessException.rule("REVERSAL_NOT_ALLOWED", "The original transfer is no longer completed.");
+            }
+
+            UUID journalId = postReversal(transfer, checker.id());
+            if (repo.markPosted(reversalId, journalId, checker.id()) != 1) {
+                throw BusinessException.conflict("INVALID_STATE", "This reversal has already been decided.");
+            }
+            audit.write(checker.username(), Actions.APPROVAL_APPROVED, "reversal/" + reversalId,
+                    Map.of("type", "reversal", "transfer_id", transfer.id().toString(), "journal_id", journalId.toString()));
+            events.info(Actions.APPROVAL_APPROVED, "username", checker.username(), "type", "reversal",
+                    "reversal_id", reversalId, "journal_id", journalId);
+            events.info(Actions.REVERSAL_CREATED, "username", checker.username(), "reversal_id", reversalId,
+                    "transfer_id", transfer.id(), "journal_id", journalId, "amount_minor", transfer.amountMinor());
+            return ResponseEntity.ok(repo.find(reversalId).orElseThrow());
+        });
     }
 
     @Transactional
-    public ResponseEntity<Object> request(AuthenticatedUser maker, UUID transferId, String reason, String idempotencyKey) {
-        String path = "/api/v1/transfers/" + transferId + "/reversals";
-        IdempotencyService.Start idem = idempotency.begin(maker, idempotencyKey, "POST", path, Map.of("reason", reason));
-        if (idem.isReplay()) {
-            return idem.replay();
-        }
-        Transfer t = transfers.findForUpdate(transferId).orElseThrow(BusinessException::notFound);
-        if (t.status() == TransferStatus.REVERSED || reversals.hasLive(transferId)) {
-            events.warn(Actions.REVERSAL_DUPLICATE_DENIED, "username", maker.username(), "transfer_id", transferId);
-            throw new RefusalException(HttpStatus.CONFLICT, "ALREADY_REVERSED",
-                    "This transfer has already been reversed, or a reversal is waiting.", List.of(),
-                    maker.username(), Actions.REVERSAL_DUPLICATE_DENIED, "transfer:" + transferId, Map.of());
-        }
-        if (t.status() != TransferStatus.COMPLETED) {
-            throw BusinessException.conflict("NOT_REVERSIBLE", "Only completed transfers can be reversed.");
-        }
-
-        String clean = reason.trim();
-        if (t.amountMinor() >= thresholdMinor) {
-            UUID id = reversals.insertPending(transferId, clean, maker.id());
-            audit.record(maker.username(), Actions.REVERSAL_CREATED, "transfer:" + transferId,
-                    Map.of("reversal_id", id, "status", "PENDING_APPROVAL", "reason", clean));
-            events.info(Actions.REVERSAL_CREATED, "username", maker.username(), "transfer_id", transferId,
-                    "reversal_id", id, "status", "PENDING_APPROVAL");
-            return idempotency.complete(idem, HttpStatus.ACCEPTED, TransferDto.of(t));
-        }
-
-        UUID journalId = post(t, clean, maker);
-        UUID id = reversals.insertPosted(transferId, clean, journalId, maker.id());
-        audit.record(maker.username(), Actions.REVERSAL_CREATED, "transfer:" + transferId,
-                Map.of("reversal_id", id, "status", "POSTED", "journal_id", journalId, "reason", clean));
-        events.info(Actions.REVERSAL_CREATED, "username", maker.username(), "transfer_id", transferId,
-                "reversal_id", id, "status", "POSTED");
-        return idempotency.complete(idem, HttpStatus.CREATED, TransferDto.of(transfers.find(transferId).orElseThrow()));
+    public ResponseEntity<?> reject(AuthenticatedUser checker, UUID reversalId, RejectRequest body, String key) {
+        String endpoint = "POST /api/v1/reversals/" + reversalId + "/reject";
+        return idempotency.execute(checker, key, endpoint, body, () -> {
+            lockPending(checker, reversalId);
+            if (repo.markRejected(reversalId, checker.id()) != 1) {
+                throw BusinessException.conflict("INVALID_STATE", "This reversal has already been decided.");
+            }
+            audit.write(checker.username(), Actions.APPROVAL_REJECTED, "reversal/" + reversalId,
+                    Map.of("type", "reversal", "reason", body.reason().trim()));
+            events.info(Actions.APPROVAL_REJECTED, "username", checker.username(), "type", "reversal",
+                    "reversal_id", reversalId);
+            return ResponseEntity.ok(repo.find(reversalId).orElseThrow());
+        });
     }
 
-    public Page<ReversalDto> pending(String cursor, Integer limit) {
+    // ---- Reads -----------------------------------------------------------------
+
+    @Transactional(readOnly = true)
+    public ReversalDto get(UUID reversalId) {
+        return repo.find(reversalId).orElseThrow(BusinessException::notFound);
+    }
+
+    @Transactional(readOnly = true)
+    public Page<ReversalDto> list(String status, String cursor, Integer limit) {
+        if (status != null && !STATUSES.contains(status)) {
+            throw BusinessException.badRequest("INVALID_PARAMETER", "Unknown status filter.");
+        }
         int lim = Cursors.limit(limit);
-        OffsetDateTime afterTs = null;
-        UUID afterId = null;
+        OffsetDateTime beforeTs = null;
+        UUID beforeId = null;
         String raw = Cursors.decode(cursor);
         if (raw != null) {
             String[] parts = raw.split("\\|", 2);
@@ -108,77 +166,47 @@ public class ReversalService {
                 throw Cursors.invalid();
             }
             try {
-                afterTs = OffsetDateTime.parse(parts[0]);
-                afterId = UUID.fromString(parts[1]);
+                beforeTs = OffsetDateTime.parse(parts[0]);
+                beforeId = UUID.fromString(parts[1]);
             } catch (DateTimeParseException | IllegalArgumentException e) {
                 throw Cursors.invalid();
             }
         }
-        return Page.of(reversals.pending(afterTs, afterId, lim + 1), lim, r -> r.requestedAt() + "|" + r.id());
+        return Page.of(repo.list(status, beforeTs, beforeId, lim + 1), lim, r -> r.requestedAt() + "|" + r.id());
     }
 
-    @Transactional
-    public ResponseEntity<Object> approve(AuthenticatedUser checker, UUID reversalId, String idempotencyKey) {
-        String path = "/api/v1/approvals/reversals/" + reversalId + "/approve";
-        IdempotencyService.Start idem = idempotency.begin(checker, idempotencyKey, "POST", path, Map.of());
-        if (idem.isReplay()) {
-            return idem.replay();
-        }
-        ReversalRepository.Row r = requirePending(checker, reversalId);
-        Transfer t = transfers.findForUpdate(r.transferId()).orElseThrow();
-        if (t.status() != TransferStatus.COMPLETED) {
-            throw BusinessException.conflict("NOT_REVERSIBLE", "The transfer is no longer in a state that can be reversed.");
-        }
+    // ---- Helpers ---------------------------------------------------------------
 
-        UUID journalId = post(t, r.reason(), checker);
-        reversals.markPosted(reversalId, journalId, checker.id());
-        audit.record(checker.username(), Actions.APPROVAL_APPROVED, "reversal:" + reversalId,
-                Map.of("transfer_id", t.id(), "maker", r.requestedByUsername(), "journal_id", journalId));
-        events.info(Actions.APPROVAL_APPROVED, "username", checker.username(), "reversal_id", reversalId,
-                "transfer_id", t.id(), "maker", r.requestedByUsername());
-        return idempotency.complete(idem, HttpStatus.OK, TransferDto.of(transfers.find(t.id()).orElseThrow()));
+    private ReversalRow lockPending(AuthenticatedUser checker, UUID reversalId) {
+        ReversalRow reversal = repo.lockReversal(reversalId).orElseThrow(BusinessException::notFound);
+        if (!"PENDING_APPROVAL".equals(reversal.status())) {
+            events.warn(Actions.REVERSAL_DENIED, "username", checker.username(), "reversal_id", reversalId,
+                    "reason", "invalid_state_" + reversal.status());
+            throw BusinessException.conflict("INVALID_STATE", "This reversal has already been decided.");
+        }
+        if (reversal.requestedBy().equals(checker.id())) {
+            events.warn(Actions.APPROVAL_SELF_APPROVAL_DENIED, "username", checker.username(), "type", "reversal",
+                    "reversal_id", reversalId);
+            throw new BusinessException(HttpStatus.FORBIDDEN, "SELF_APPROVAL",
+                    "You requested this reversal, so another approver must decide.");
+        }
+        return reversal;
     }
 
-    @Transactional
-    public ResponseEntity<Object> reject(AuthenticatedUser checker, UUID reversalId, String reason, String idempotencyKey) {
-        String path = "/api/v1/approvals/reversals/" + reversalId + "/reject";
-        IdempotencyService.Start idem = idempotency.begin(checker, idempotencyKey, "POST", path, Map.of("reason", reason));
-        if (idem.isReplay()) {
-            return idem.replay();
+    /** Posts the swapped entries. The original journal and entries are never touched. */
+    private UUID postReversal(TransferForReversal transfer, UUID actorId) {
+        ledger.lockAccounts(transfer.fromAccountId(), transfer.toAccountId());
+        if (ledger.balance(transfer.toAccountId()) < transfer.amountMinor()) {
+            throw BusinessException.rule("REVERSAL_INSUFFICIENT_FUNDS",
+                    "The receiving account no longer holds enough money to reverse this transfer.");
         }
-        ReversalRepository.Row r = requirePending(checker, reversalId);
-        reversals.markRejected(reversalId, checker.id());
-        audit.record(checker.username(), Actions.APPROVAL_REJECTED, "reversal:" + reversalId,
-                Map.of("transfer_id", r.transferId(), "maker", r.requestedByUsername(), "reason", reason.trim()));
-        events.info(Actions.APPROVAL_REJECTED, "username", checker.username(), "reversal_id", reversalId,
-                "maker", r.requestedByUsername());
-        return idempotency.complete(idem, HttpStatus.OK, reversals.dto(reversalId));
-    }
-
-    /** Moves the money back: the original recipient must still have it. */
-    private UUID post(Transfer t, String reason, AuthenticatedUser by) {
-        accounts.lock(t.fromAccountId(), t.toAccountId());
-        if (accounts.balance(t.toAccountId()) < t.amountMinor()) {
-            throw BusinessException.rule("INSUFFICIENT_FUNDS",
-                    "The recipient no longer holds enough money to reverse this transfer.");
+        String reference = transfer.reference() == null || transfer.reference().isBlank() ? "transfer" : transfer.reference();
+        UUID journalId = ledger.post("REVERSAL", "Reversal of " + reference, transfer.journalId(), actorId, List.of(
+                new Line(transfer.toAccountId(), Direction.DEBIT, transfer.amountMinor()),
+                new Line(transfer.fromAccountId(), Direction.CREDIT, transfer.amountMinor())));
+        if (repo.markTransferReversed(transfer.id(), journalId) != 1) {
+            throw BusinessException.conflict("INVALID_STATE", "This transfer was changed by another request.");
         }
-        UUID journalId = ledger.postReversal(t.journalId(), t.fromAccountId(), t.toAccountId(), t.amountMinor(),
-                "Reversal: " + reason, by.id());
-        transfers.markReversed(t.id(), journalId);
         return journalId;
-    }
-
-    private ReversalRepository.Row requirePending(AuthenticatedUser checker, UUID reversalId) {
-        ReversalRepository.Row r = reversals.findForUpdate(reversalId).orElseThrow(BusinessException::notFound);
-        if (!"PENDING_APPROVAL".equals(r.status())) {
-            throw BusinessException.conflict("NOT_PENDING", "This reversal has already been decided.");
-        }
-        if (checker.id().equals(r.requestedBy())) {
-            events.warn(Actions.APPROVAL_SELF_APPROVAL_DENIED, "username", checker.username(), "reversal_id", reversalId);
-            throw new RefusalException(HttpStatus.FORBIDDEN, "SELF_APPROVAL",
-                    "You can't approve or reject a reversal you requested.", List.of(),
-                    checker.username(), Actions.APPROVAL_SELF_APPROVAL_DENIED, "reversal:" + reversalId, Map.of());
-        }
-        return r;
     }
 }

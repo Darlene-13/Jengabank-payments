@@ -66,10 +66,15 @@ export default function Reversals() {
     setError(null);
     try {
       const result = await transfersApi.reverse(t.id, { reason: reason.trim() }, keyRef.current);
-      selected.setData(result);
       setOpen(false);
+      selected.reload();
       recent.reload();
-      notify(result.status === "PENDING_APPROVAL" ? "Reversal sent for approval." : "Reversal posted.", "success");
+      notify(
+        result.status === "PENDING_APPROVAL"
+          ? "Reversal sent for approval. A checker must approve it before money moves."
+          : "Reversal posted.",
+        "success",
+      );
     } catch (e) {
       setError(toApiError(e));
     } finally {

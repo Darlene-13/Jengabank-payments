@@ -1,4 +1,4 @@
-import type { CreateTransferRequest, Page, ReversalRequest, Transfer, TransferStatus } from "../types/api";
+import type { CreateTransferRequest, Page, Reversal, ReversalRequest, Transfer, TransferStatus } from "../types/api";
 import { api, query, seg } from "./client";
 
 export const transfersApi = {
@@ -8,5 +8,5 @@ export const transfersApi = {
     api<Page<Transfer>>(`/api/v1/transfers${query({ limit: opts.limit ?? 50, cursor: opts.cursor, status: opts.status })}`, { signal }),
   get: (id: string, signal?: AbortSignal) => api<Transfer>(`/api/v1/transfers/${seg(id)}`, { signal }),
   reverse: (id: string, body: ReversalRequest, idempotencyKey: string) =>
-    api<Transfer>(`/api/v1/transfers/${seg(id)}/reversals`, { method: "POST", body, idempotencyKey }),
+    api<Reversal>(`/api/v1/transfers/${seg(id)}/reversals`, { method: "POST", body, idempotencyKey }),
 };
