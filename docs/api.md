@@ -155,6 +155,7 @@ See the [full catalogue](#11-error-code-catalogue).
 | `GET /approvals`, per user         | 30 per minute          | `429 RATE_LIMITED` |
 | `GET /accounts/{id}/entries`, per user | 30 per minute      | `429 RATE_LIMITED` |
 | Transfer velocity, per customer    | 5 per 60 seconds       | `422 TRANSFER_BLOCKED` (recorded) |
+| Unknown destination account numbers, per customer | 5 per 10 minutes | `429 RATE_LIMITED` (anti-enumeration; each miss is audited) |
 | Request body size                  | 16 KB                  | `413 PAYLOAD_TOO_LARGE` |
 
 The rate limiters are **backed by the database** with an atomic upsert, so limits hold across several app instances and restarts. Every limit hit is logged as `rate.limited`.
@@ -357,6 +358,7 @@ flowchart TD
 | `202 Accepted` | `PENDING_APPROVAL`. A checker must approve. No money has moved. |
 | `422`          | `TRANSFER_BLOCKED` (limit or fraud, with `reasons`), `INSUFFICIENT_FUNDS`, `INVALID_DESTINATION`, `SAME_ACCOUNT` or `ACCOUNT_NOT_ACTIVE` |
 | `404`          | The source account isn't yours, or doesn't exist |
+| `429`          | `RATE_LIMITED`: more than 5 unknown destination account numbers in 10 minutes |
 | `409`          | `IDEMPOTENCY_CONFLICT` |
 
 **Transfer object**
@@ -677,7 +679,7 @@ These are the guarantees we claim, and how each one is enforced.
 | 422 | `REVERSAL_NOT_ALLOWED` | Only `COMPLETED` transfers can be reversed |
 | 422 | `REVERSAL_INSUFFICIENT_FUNDS` | The receiver can't give the money back |
 | 422 | `RULE_VIOLATION` | A database guard rejected the change (the backstop fired) |
-| 429 | `RATE_LIMITED` | Slow down |
+| 429 | `RATE_LIMITED` | Slow down: login, list endpoints, or too many unknown destination account numbers |
 | 500 | `INTERNAL_ERROR` | Unexpected. Quote the `requestId`. |
 
 ---
