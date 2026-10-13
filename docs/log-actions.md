@@ -28,6 +28,8 @@ Required fields for request/decision records are:
 
 `requestId` must match the response header `X-Request-Id`. `path` should be the route template without sensitive query-string values. Do not log passwords, tokens, signing keys, password hashes, full account numbers, or raw request bodies.
 
+Security events (`logger_name: security`) raised inside an authenticated request always carry `username`, including rejections such as validation errors, unreadable bodies and role denials, so events can be grouped by user without a `requestId` join.
+
 The runtime may include additional fields, but the verification matrix validates the JengaSec contract above rather than the older `actor/anonymous`, `event`, or `timestamp` naming.
 
 ## 3. Events
@@ -44,7 +46,7 @@ This list matches the current `Actions.java` constants.
 | 6 | `auth.account.locked` | WARN | Lockout triggered or attempt on locked account | failure count, lock expiry |
 | 7 | `auth.token.invalid` | WARN | Invalid, revoked, expired, malformed or query-string token | reason code |
 | 8 | `auth.logout` | INFO | Logout | user, role |
-| 9 | `authz.access.denied` | WARN | Ownership/role failure | resource type, resource ID, required role |
+| 9 | `authz.access.denied` | WARN | Ownership/role failure | username; ownership: resource type, resource ID; role: `reason: role`, path, src_ip |
 | 10 | `account.viewed` | INFO | Read own account | accountId |
 | 11 | `transfer.created` | INFO | Transfer accepted | transferId, amountMinor, source, destination |
 | 12 | `transfer.completed` | INFO | Status COMPLETED | transferId |
